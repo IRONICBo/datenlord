@@ -240,7 +240,6 @@ impl KVEngine for EtcdKVEngine {
             .await
             .with_context(|| "Failed to create watcher".to_owned())?;
 
-
         let self_prefix = prefix.to_string_key();
         // Spawn a new task to handle the watch stream
         tokio::spawn(async move {

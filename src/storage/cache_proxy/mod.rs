@@ -7,7 +7,7 @@ pub mod ring;
 pub mod node;
 
 /// Cluster informer module, use metadata to manage the nodes
-pub mod cluster_informer;
+pub mod cluster_manager;
 
 /// Cluster module, manage the distribute cache cluster
 pub mod cluster;
