@@ -1,12 +1,13 @@
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::time::Duration;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use datenlord::metrics::KV_METRICS;
 use etcd_client::{
     Compare, CompareOp, DeleteOptions, GetOptions, LockOptions, PutOptions, Txn, TxnOp,
 };
+use tokio::sync::mpsc;
 
 use super::{
     check_ttl, conv_u64_sec_2_i64, fmt, DeleteOption, KVEngine, KeyType, KvVersion, LockKeyType,
@@ -80,6 +81,15 @@ impl KVEngine for EtcdKVEngine {
             .await
             .with_context(|| "failed to get lease at `MetaTxn::lock`".to_owned())?
             .id())
+    }
+
+    async fn lease_keep_alive(&self, lease_id: i64) -> DatenLordResult<()> {
+        let mut client = self.client.clone();
+        client
+            .lease_keep_alive(lease_id)
+            .await
+            .with_context(|| "failed to keep alive lease at `MetaTxn::lock`".to_owned())?;
+        Ok(())
     }
 
     /// Distribute lock - lock
@@ -207,10 +217,68 @@ impl KVEngine for EtcdKVEngine {
         }
     }
 
+    /// Range get, return all key-value pairs start with prefix
     async fn range(&self, prefix: &KeyType) -> DatenLordResult<Vec<ValueType>> {
         let _timer = KV_METRICS.start_kv_operation_timer("range");
         let result = self.range_raw_key(prefix.to_string_key()).await?;
         Ok(result)
+    }
+
+    /// Watch the key, return a receiver to receive the value
+    async fn watch(
+        &self,
+        prefix: &KeyType,
+    ) -> DatenLordResult<Arc<mpsc::Receiver<(String, Option<ValueType>)>>> {
+        // Create a mpsc channel, default capacity is 1024
+        let (tx, rx) = mpsc::channel(1024);
+
+        let mut client = self.client.clone();
+        // Try to watch the key prefix
+        let opt = etcd_client::WatchOptions::new().with_prefix();
+        let (_watcher, mut watch_stream) = client
+            .watch(prefix.to_string_key(), Some(opt.clone()))
+            .await
+            .with_context(|| "Failed to create watcher".to_owned())?;
+
+
+        let self_prefix = prefix.to_string_key();
+        // Spawn a new task to handle the watch stream
+        tokio::spawn(async move {
+            while let Ok(response) = watch_stream.message().await {
+                match response {
+                    Some(watch_response) => {
+                        for event in watch_response.events() {
+                            // Get event data
+                            let kv = event.kv().unwrap();
+                            // Get key and value
+                            let item_key = kv
+                                .key_str()
+                                .unwrap()
+                                .strip_prefix(self_prefix.as_str())
+                                .unwrap()
+                                .to_string();
+                            let item_value = serde_json::from_slice(kv.value()).with_context(||{
+                                "failed to deserialize value from bytes, KVEngine's value supposed to be `ValueType`".to_owned()
+                            }).unwrap();
+
+                            match event.event_type() {
+                                etcd_client::EventType::Put => {
+                                    tx.send((item_key, Some(item_value))).await.unwrap();
+                                }
+                                etcd_client::EventType::Delete => {
+                                    tx.send((item_key, None)).await.unwrap();
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        continue;
+                    }
+                }
+            }
+        });
+
+        Ok(Arc::new(rx))
     }
 }
 

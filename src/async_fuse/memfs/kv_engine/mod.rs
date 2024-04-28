@@ -1,8 +1,10 @@
 use core::fmt::Debug;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 use crate::common::async_fuse_error::KVEngineError;
 use crate::common::error::{DatenLordError, DatenLordResult};
@@ -225,8 +227,17 @@ pub trait KVEngine: Send + Sync + Debug + Sized {
     /// Lease grant
     async fn lease_grant(&self, ttl: i64) -> DatenLordResult<i64>;
 
+    /// Lease keep alive
+    async fn lease_keep_alive(&self, lease_id: i64) -> DatenLordResult<()>;
+
     /// Range get, return all key-value pairs start with prefix
     async fn range(&self, prefix: &KeyType) -> DatenLordResult<Vec<ValueType>>;
+
+    /// Watch the key, return a receiver to receive the value
+    async fn watch(
+        &self,
+        key: &KeyType,
+    ) -> DatenLordResult<Arc<mpsc::Receiver<(String, Option<ValueType>)>>>;
 }
 
 /// The version of the key.
