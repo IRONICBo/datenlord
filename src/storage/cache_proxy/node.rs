@@ -1,7 +1,4 @@
-use std::{
-    str::FromStr,
-    sync::{Arc, Mutex},
-};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,8 +19,6 @@ pub struct Node {
     weight: u32,
     /// The status of the node
     status: NodeStatus,
-    /// The role of the node
-    role: NodeRole,
 }
 
 impl NodeType for Node {}
@@ -51,19 +46,17 @@ impl Node {
             ip: String::new(),
             port: 0,
             weight: 0,
-            status: NodeStatus::Prepare,
-            role: NodeRole::Slave,
+            status: NodeStatus::Initializing,
         }
     }
 
     /// Create a new node
-    pub fn new(ip: String, port: u16, weight: u32, status: NodeStatus, role: NodeRole) -> Self {
+    pub fn new(ip: String, port: u16, weight: u32, status: NodeStatus) -> Self {
         Self {
             ip,
             port,
             weight,
             status,
-            role,
         }
     }
 
@@ -102,9 +95,11 @@ impl Node {
         self.status.clone()
     }
 
-    /// Get the role of the node
-    pub fn role(&self) -> NodeRole {
-        self.role.clone()
+    /// Change the status of the node
+    /// We export this function to change the status of the node,
+    /// The state machine is managed by the cluster manager
+    pub fn set_status(&mut self, status: NodeStatus) {
+        self.status = status;
     }
 
     /// Get self clone
@@ -114,45 +109,21 @@ impl Node {
             port: self.port,
             weight: self.weight,
             status: self.status.clone(),
-            role: self.role.clone(),
         }
-    }
-
-    /// Set online
-    pub fn set_online(&mut self) {
-        self.status = NodeStatus::Online;
-    }
-
-    /// Set offline
-    pub fn set_offline(&mut self) {
-        self.status = NodeStatus::Offline;
-    }
-
-    /// Set prepare
-    pub fn set_prepare(&mut self) {
-        self.status = NodeStatus::Prepare;
-    }
-
-    /// Set master
-    pub fn set_master(&mut self) {
-        self.role = NodeRole::Master;
-    }
-
-    /// Set slave
-    pub fn set_slave(&mut self) {
-        self.role = NodeRole::Slave;
     }
 }
 
 /// Node status
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NodeStatus {
-    /// The node is online
-    Online,
-    /// The node is offline
-    Offline,
     /// The node is preparing
-    Prepare,
+    Initializing,
+    /// The node is registering
+    Registering,
+    /// The node is serve as slave
+    Slave,
+    /// The node is serve as master
+    Master,
 }
 
 impl FromStr for NodeStatus {
@@ -161,83 +132,11 @@ impl FromStr for NodeStatus {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.to_lowercase();
         match s.as_str() {
-            "online" => Ok(NodeStatus::Online),
-            "offline" => Ok(NodeStatus::Offline),
-            "prepare" => Ok(NodeStatus::Prepare),
+            "initializing" => Ok(NodeStatus::Initializing),
+            "registering" => Ok(NodeStatus::Registering),
+            "slave" => Ok(NodeStatus::Slave),
+            "master" => Ok(NodeStatus::Master),
             _ => Err(format!("Unknown node status: {}", s)),
         }
-    }
-}
-
-/// Node role
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum NodeRole {
-    /// The node is master
-    Master,
-    /// The node is slave
-    Slave,
-}
-
-impl ToString for NodeRole {
-    fn to_string(&self) -> String {
-        match self {
-            NodeRole::Master => "master".to_string(),
-            NodeRole::Slave => "slave".to_string(),
-        }
-    }
-}
-
-impl FromStr for NodeRole {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.to_lowercase();
-        match s.as_str() {
-            "master" => Ok(NodeRole::Master),
-            "slave" => Ok(NodeRole::Slave),
-            _ => Err(format!("Unknown node role: {}", s)),
-        }
-    }
-}
-
-/// Node list
-///
-/// Node list is used to manage the physical nodes
-#[derive(Debug)]
-pub struct NodeList {
-    inner: Arc<Mutex<Vec<Node>>>,
-}
-
-impl NodeList {
-    /// Create a new node list
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    /// Add a node to the list
-    pub fn add(&self, node: Node) {
-        self.inner.lock().unwrap().push(node);
-    }
-
-    /// Get the node list
-    pub fn list(&self) -> Vec<Node> {
-        self.inner.lock().unwrap().clone()
-    }
-
-    /// Remove a node from the list by ip
-    pub fn remove(&self, ip: &str) {
-        let mut list = self.inner.lock().unwrap();
-        list.retain(|node| node.ip() != ip);
-    }
-
-    /// Get the node by ip
-    pub fn get(&self, ip: &str) -> Option<Node> {
-        let list = match self.inner.lock() {
-            Ok(lock) => lock,
-            Err(_) => return None,
-        };
-        list.iter().find(|node| node.ip() == ip).cloned()
     }
 }

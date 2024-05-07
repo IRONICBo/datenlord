@@ -25,6 +25,8 @@ pub mod value_type;
 
 pub use key_type::{KeyType, LockKeyType};
 pub use value_type::ValueType;
+
+use self::etcd_impl::Session;
 /// The Txn is used to provide support for metadata.
 #[async_trait]
 pub trait MetaTxn: Send {
@@ -227,8 +229,18 @@ pub trait KVEngine: Send + Sync + Debug + Sized {
     /// Lease grant
     async fn lease_grant(&self, ttl: i64) -> DatenLordResult<i64>;
 
-    /// Lease keep alive
-    async fn lease_keep_alive(&self, lease_id: i64) -> DatenLordResult<()>;
+    /// Try to campaign the key with the value.
+    /// It will return leader key,
+    /// then other nodes can watch the leader key to watch the leader.
+    async fn campaign(
+        &self,
+        key: &LockKeyType,
+        value: &ValueType,
+        lease_id: i64,
+    ) -> DatenLordResult<String>;
+
+    /// Create keep alive session
+    async fn create_session(&self, lease_id: i64, ttl: i64) -> Arc<Session>;
 
     /// Range get, return all key-value pairs start with prefix
     async fn range(&self, prefix: &KeyType) -> DatenLordResult<Vec<ValueType>>;

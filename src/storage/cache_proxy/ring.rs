@@ -170,6 +170,16 @@ where
         }
     }
 
+    /// Create a new hash ring with current given hash builder and capacity
+    pub fn dump(&self) -> Self {
+        Self {
+            hash_builder: self.hash_builder,
+            slots: self.slots.clone(),
+            capacity: self.capacity,
+            version: self.version,
+        }
+    }
+
     /// Get the slot length
     pub fn len_slots(&self) -> usize {
         self.slots.len()

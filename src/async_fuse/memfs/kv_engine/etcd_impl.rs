@@ -8,12 +8,156 @@ use etcd_client::{
     Compare, CompareOp, DeleteOptions, GetOptions, LockOptions, PutOptions, Txn, TxnOp,
 };
 use tokio::sync::mpsc;
+use tracing::{error, info};
 
 use super::{
     check_ttl, conv_u64_sec_2_i64, fmt, DeleteOption, KVEngine, KeyType, KvVersion, LockKeyType,
     MetaTxn, SetOption, ValueType,
 };
 use crate::common::error::{Context, DatenLordResult};
+
+/// Session
+/// Try to keep lease and retry when lease is expired.
+/// When we need to create a keep alive key in etcd,
+/// we need to create a lease in `set` function, and create a session by lease id.
+#[derive(Debug)]
+pub struct Session {
+    /// Try to strop
+    close_tx: mpsc::Sender<()>,
+    /// Inner session
+    inner: Arc<SessionInner>,
+}
+
+/// SessionInner
+/// The inner struct of Session.
+pub struct SessionInner {
+    /// The etcd client.
+    client: etcd_client::Client,
+    /// The lease id.
+    lease_id: i64,
+    /// The lease keep alive interval.
+    ttl: i64,
+}
+
+impl Debug for SessionInner {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionInner")
+            .field("lease_id", &self.lease_id)
+            .field("ttl", &self.ttl)
+            .finish()
+    }
+}
+
+impl Session {
+    /// Create a new session.
+    pub async fn new(cli: &etcd_client::Client, lease_id: i64, ttl: i64) -> Arc<Self> {
+        let (close_tx, close_rx) = mpsc::channel(1);
+        let inner = Arc::new(SessionInner {
+            client: cli.clone(),
+            lease_id,
+            ttl,
+        });
+        let inner_clone = inner.clone();
+        tokio::spawn(inner_clone.keep_alive(close_rx));
+        return Arc::new(Session { close_tx, inner });
+    }
+
+    /// Manaully close the session.
+    pub fn close(&self) {
+        if self.close_tx.try_send(()).is_err() {
+            error!("failed to send close signal to session");
+        }
+    }
+
+    /// Check if the session is closed.
+    pub fn is_closed(&self) -> bool {
+        self.close_tx.is_closed()
+    }
+
+    /// Get the inner session.
+    pub fn inner(&self) -> Arc<SessionInner> {
+        self.inner.clone()
+    }
+
+    /// Get lease
+    pub fn lease_id(&self) -> i64 {
+        self.inner.lease_id
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+impl SessionInner {
+    async fn keep_alive(self: Arc<Self>, mut close_rx: mpsc::Receiver<()>) {
+        let mut client = self.client.clone();
+        let mut interval = tokio::time::interval(Duration::from_secs(self.ttl as u64 / 3));
+        let mut lease_keeper;
+        let mut lease_keep_alive_stream;
+
+        // Try to get lease response
+        match client.lease_keep_alive(self.lease_id).await {
+            Ok((lk, lkas)) => {
+                lease_keeper = lk;
+                lease_keep_alive_stream = lkas;
+            }
+            Err(e) => {
+                error!("failed to keep alive lease, error={}", e);
+                return;
+            }
+        }
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // Try to send request
+                    lease_keeper.keep_alive().await;
+                    //
+                    match lease_keep_alive_stream.message().await {
+                        Ok(Some(msg)) => {
+                            // Check the lease keep alive response
+                            if msg.id() != self.lease_id {
+                                error!("lease id is not match, expect={}, actual={}", self.lease_id, msg.id());
+                                return;
+                            }
+
+                            // Check ttl
+                            if msg.ttl() != self.ttl || msg.ttl() <= 0 {
+                                error!("lease ttl is not match, expect={}, actual={}", self.ttl, msg.ttl());
+                                return;
+                            }
+
+                            info!("keep alive lease success, lease_id={}, ttl={}", self.lease_id, self.ttl);
+                            // Keep alive the lease
+                            continue;
+                        }
+                        Ok(None) => {
+                            // The lease is expired
+                            info!("lease is expired, try to get a new lease");
+                            // Inform tx to close the session
+                            return;
+                        }
+                        Err(e) => {
+                            error!("failed to keep alive lease, error={}", e);
+                            return;
+                        }
+                    }
+                }
+                _ = close_rx.recv() => {
+                    // Try to revoke the lease
+                    let _ = client.lease_revoke(self.lease_id).await;
+                    drop(lease_keeper);
+                    info!("receive keep alive session request, close the session");
+                    return;
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 /// Wrap the etcd client to support the `KVEngine` trait.
@@ -83,13 +227,81 @@ impl KVEngine for EtcdKVEngine {
             .id())
     }
 
-    async fn lease_keep_alive(&self, lease_id: i64) -> DatenLordResult<()> {
+    async fn create_session(&self, lease_id: i64, ttl: i64) -> Arc<Session> {
+        Session::new(&self.client, lease_id, ttl).await
+    }
+
+    /// Try to campaign the key with the value.
+    /// It will return leader key,
+    /// then other nodes can watch the leader key to watch the leader.
+    async fn campaign(
+        &self,
+        key: &LockKeyType,
+        value: &ValueType,
+        lease_id: i64,
+    ) -> DatenLordResult<String> {
         let mut client = self.client.clone();
-        client
-            .lease_keep_alive(lease_id)
+
+        // Try to put the key with the value.
+        // The key is `prefix/xxx`,
+        // when we set the set the key, we need to get range value with prefix
+        // and select the value with minimum revision as leader key.
+        // If current key is not the leader key,
+        // we need to delete current key and return the leader key.
+        let txn = Txn::new()
+            .when(vec![Compare::version(
+                key.to_string_key(),
+                CompareOp::Equal,
+                0,
+            )])
+            .and_then(vec![TxnOp::put(
+                key.to_string_key(),
+                serde_json::to_vec(value).unwrap(),
+                Some(PutOptions::new().with_lease(lease_id)),
+            )])
+            .or_else(vec![
+                // Delete old key
+                TxnOp::delete(key.to_string_key(), None),
+                TxnOp::put(
+                    key.to_string_key(),
+                    serde_json::to_vec(value).unwrap(),
+                    Some(PutOptions::new().with_lease(lease_id)),
+                ),
+            ]);
+
+        let resp = client.txn(txn).await.with_context(|| {
+            format!(
+                "failed to campaign the key={key:?} with value={value:?}",
+                key = key,
+                value = value
+            )
+        })?;
+
+        if !resp.succeeded() {
+            error!(
+                "failed to campaign the key={key:?} with value={value:?}",
+                key = key,
+                value = value
+            );
+        }
+
+        // Find the minimum revision key
+        let resp = client
+            .get(key.to_string_key(), Some(GetOptions::new().with_prefix()))
             .await
-            .with_context(|| "failed to keep alive lease at `MetaTxn::lock`".to_owned())?;
-        Ok(())
+            .with_context(|| "failed to get from etcd engine".to_owned())?;
+        let kvs = resp.kvs();
+        let mut min_revision = i64::MAX;
+        let mut leader_key = key;
+        for kv in kvs {
+            // Get the latest revision key data
+            let revision = kv.mod_revision();
+            if revision < min_revision {
+                min_revision = revision;
+                leader_key = key;
+            }
+        }
+        Ok(leader_key.get_name_string())
     }
 
     /// Distribute lock - lock
@@ -239,7 +451,6 @@ impl KVEngine for EtcdKVEngine {
             .watch(prefix.to_string_key(), Some(opt.clone()))
             .await
             .with_context(|| "Failed to create watcher".to_owned())?;
-
 
         let self_prefix = prefix.to_string_key();
         // Spawn a new task to handle the watch stream

@@ -30,9 +30,8 @@ pub enum KeyType {
     String(String),
     /// Distributed cache node key
     CacheNode(String),
-    /// Distributed hash ring key
-    CacheRing(String),
     /// Distributed cache node master key
+    /// Value will be the hashring data
     CacheNodeMaster(String),
 }
 
@@ -65,8 +64,7 @@ impl Display for KeyType {
             #[cfg(test)]
             KeyType::String(ref s) => write!(f, "String({s})"),
             KeyType::CacheNode(ref s) => write!(f, "CacheNode({s})"),
-            KeyType::CacheRing(ref s) => write!(f, "CacheRing({s})"), // CacheRing
-            KeyType::CacheNodeMaster(ref s) => write!(f, "CacheNodeMaster({s})"), // CacheNodeMaster
+            KeyType::CacheNodeMaster(ref s) => write!(f, "CacheNodeMaster/({s})"), // CacheNodeMaster
         }
     }
 }
@@ -84,7 +82,7 @@ impl Display for LockKeyType {
                 write!(f, "FileNodeListLock({inum:?})")
             }
             LockKeyType::CacheNodeMaster(ref s) => {
-                write!(f, "CacheNodeMaster({s})")
+                write!(f, "CacheNodeMaster/({s})") // CacheNodeMaster
             }
         }
     }
@@ -115,8 +113,16 @@ impl KeyType {
             KeyType::VolumeInfo(_) => "VolumeInfo",
             KeyType::FileNodeList(_) => "FileNodeList",
             KeyType::CacheNode(_) => "CacheNode",
-            KeyType::CacheRing(_) => "CacheRing",
-            KeyType::CacheNodeMaster(_) => "CacheNodeMaster",
+            KeyType::CacheNodeMaster(_) => "CacheNodeMaster/",
+        }
+    }
+
+    /// Retrieves the specific name associated with the key type
+    pub fn get_name_string(&self) -> String {
+        match *self {
+            KeyType::CacheNode(name) => name,
+            KeyType::CacheNodeMaster(name) => name,
+            _ => "".to_string(),
         }
     }
 
@@ -148,9 +154,6 @@ impl KeyType {
             KeyType::CacheNode(ref s) => {
                 write!(f, "{s}").unwrap();
             }
-            KeyType::CacheRing(ref s) => {
-                write!(f, "{s}").unwrap();
-            }
             KeyType::CacheNodeMaster(ref s) => {
                 write!(f, "{s}").unwrap();
             }
@@ -172,12 +175,20 @@ impl LockKeyType {
 
     /// Retrieves the specific prefix associated with the lock key type.
     #[must_use]
-    fn prefix(&self) -> &str {
+    pub fn prefix(&self) -> &str {
         match *self {
             LockKeyType::IdAllocatorLock(_) => "IdAllocLock",
             LockKeyType::VolumeInfoLock => "VolumeInfoLock",
             LockKeyType::FileNodeListLock(_) => "FileNodeListLock",
-            LockKeyType::CacheNodeMaster(_) => "CacheNodeMaster",
+            LockKeyType::CacheNodeMaster(_) => "CacheNodeMaster/",
+        }
+    }
+
+    /// Retrieves the specific name associated with the key type
+    pub fn get_name_string(&self) -> String {
+        match *self {
+            LockKeyType::CacheNodeMaster(name) => name,
+            _ => "".to_string(),
         }
     }
 
