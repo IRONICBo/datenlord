@@ -1115,10 +1115,10 @@ mod test {
         let val = "test_campaign_val".to_owned();
         let val2 = "test_campaign_val2".to_owned();
 
-        let session = client.create_session(5).await.unwrap();
+        let campaign_session_1 = client.create_session(5).await.unwrap();
         // Campaign the key
         let (campaign_status, campaign_val) = txn
-            .campaign(&key, val.clone(), Arc::clone(&session))
+            .campaign(&key, val.clone(), Arc::clone(&campaign_session_1))
             .await
             .unwrap();
         assert!(campaign_status);
@@ -1126,13 +1126,12 @@ mod test {
         let result_lease_id = get_lease_id_from_key(vec![ETCD_ADDRESS.to_owned()], &key)
             .await
             .unwrap();
-        assert_eq!(result_lease_id, session.lease_id());
+        assert_eq!(result_lease_id, campaign_session_1.lease_id());
 
-        let session = client.create_session(5).await.unwrap();
-        let latest_lease_id = session.lease_id();
+        let campaign_session_2 = client.create_session(5).await.unwrap();
         // Recampaign the key
         let (campaign_status, campaign_val) = txn
-            .campaign(&key, val.clone(), Arc::clone(&session))
+            .campaign(&key, val.clone(), Arc::clone(&campaign_session_2))
             .await
             .unwrap();
         assert!(campaign_status);
@@ -1141,12 +1140,13 @@ mod test {
         let result_lease_id = get_lease_id_from_key(vec![ETCD_ADDRESS.to_owned()], &key)
             .await
             .unwrap();
-        assert_eq!(result_lease_id, session.lease_id());
+        assert_ne!(result_lease_id, campaign_session_1.lease_id());
+        assert_eq!(result_lease_id, campaign_session_2.lease_id());
 
-        let session = client.create_session(5).await.unwrap();
+        let campaign_session_3 = client.create_session(5).await.unwrap();
         // Campaign the key with different value, campaign failed
         let (campaign_status, campaign_val) = txn
-            .campaign(&key, val2.clone(), Arc::clone(&session))
+            .campaign(&key, val2.clone(), Arc::clone(&campaign_session_3))
             .await
             .unwrap();
         assert!(!campaign_status);
@@ -1154,7 +1154,8 @@ mod test {
         let result_lease_id = get_lease_id_from_key(vec![ETCD_ADDRESS.to_owned()], &key)
             .await
             .unwrap();
-        assert_ne!(result_lease_id, session.lease_id());
-        assert_eq!(result_lease_id, latest_lease_id);
+        assert_ne!(result_lease_id, campaign_session_1.lease_id());
+        assert_ne!(result_lease_id, campaign_session_3.lease_id());
+        assert_eq!(result_lease_id, campaign_session_2.lease_id());
     }
 }
