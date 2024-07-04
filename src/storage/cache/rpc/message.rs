@@ -1,91 +1,16 @@
+use std::mem;
+
+use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
+use tracing::error;
+
+use crate::async_fuse::util::usize_to_u64;
 
 use super::{
     error::RpcError,
-    packet::{Decode, Encode, Packet, PacketStatus},
+    packet::{Decode, Encode, Packet},
     utils::get_u64_from_buf,
 };
-
-/// Impl the keep alive request for Packet trait
-#[derive(Debug, Clone)]
-pub struct KeepAlivePacket {
-    /// The sequence number of the request.
-    pub seq: u64,
-    /// The operation type of the request.
-    pub op: u8,
-    /// The status of the request.
-    pub status: PacketStatus,
-}
-
-impl Default for KeepAlivePacket {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl KeepAlivePacket {
-    /// Create a new keep alive packet.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            seq: 0,
-            op: 0,
-            status: PacketStatus::Pending,
-        }
-    }
-}
-
-impl Packet for KeepAlivePacket {
-    /// Get the packet seq number
-    fn seq(&self) -> u64 {
-        self.seq
-    }
-
-    /// Set the packet seq number
-    fn set_seq(&mut self, seq: u64) {
-        self.seq = seq;
-    }
-
-    /// Get packet type
-    fn op(&self) -> u8 {
-        self.op
-    }
-
-    /// Set packet type
-    fn set_op(&mut self, op: u8) {
-        self.op = op;
-    }
-
-    /// Set the raw request data
-    fn set_req_data(&mut self, _data: &[u8]) -> Result<(), RpcError<String>> {
-        Ok(())
-    }
-
-    /// Get the raw request data
-    fn get_req_data(&self) -> Result<Vec<u8>, RpcError<String>> {
-        Ok(Vec::new())
-    }
-
-    /// Set the raw response data
-    fn set_resp_data(&mut self, _data: &[u8]) -> Result<(), RpcError<String>> {
-        Ok(())
-    }
-
-    /// Get the raw response data
-    fn get_resp_data(&self) -> Result<Vec<u8>, RpcError<String>> {
-        Ok(Vec::new())
-    }
-
-    /// Get the packet status
-    fn status(&self) -> PacketStatus {
-        self.status
-    }
-
-    /// Set the packet status
-    fn set_status(&mut self, status: PacketStatus) {
-        self.status = status;
-    }
-}
 
 /// The request type of the request.
 #[derive(Debug)]
@@ -98,7 +23,7 @@ pub enum ReqType {
 
 impl ReqType {
     /// Convert u8 to `ReqType`
-    pub fn from_u8(op: u8) -> Result<Self, RpcError<String>> {
+    pub fn from_u8(op: u8) -> Result<Self, RpcError> {
         match op {
             0 => Ok(Self::KeepAliveRequest),
             1 => Ok(Self::FileBlockRequest),
@@ -129,7 +54,7 @@ pub enum RespType {
 
 impl RespType {
     /// Convert u8 to `RespType`
-    pub fn from_u8(op: u8) -> Result<Self, RpcError<String>> {
+    pub fn from_u8(op: u8) -> Result<Self, RpcError> {
         match op {
             0 => Ok(Self::KeepAliveResponse),
             1 => Ok(Self::FileBlockResponse),
@@ -150,10 +75,8 @@ impl RespType {
 }
 
 /// Common data structures shared between the client and server.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FileBlockRequest {
-    /// The sequence number of the request.
-    pub seq: u64,
     /// The file ID.
     pub file_id: u64,
     /// The block ID.
@@ -164,52 +87,34 @@ pub struct FileBlockRequest {
 
 impl Encode for FileBlockRequest {
     /// Encode the file block request into a byte buffer.
-    fn encode(&self) -> Vec<u8> {
-        encode_file_block_request(self)
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u64(self.file_id.to_le());
+        buf.put_u64(self.block_id.to_le());
+        buf.put_u64(self.block_size.to_le());
     }
 }
 
 impl Decode for FileBlockRequest {
     /// Decode the byte buffer into a file block request.
-    fn decode(buf: &[u8]) -> Result<Self, RpcError<String>> {
-        decode_file_block_request(buf)
+    fn decode(buf: &[u8]) -> Result<Self, RpcError> {
+        if buf.len() < 24 {
+            return Err(RpcError::InternalError("Insufficient bytes".to_owned()));
+        }
+        let file_id = get_u64_from_buf(buf, 0)?;
+        let block_id = get_u64_from_buf(buf, 8)?;
+        let block_size = get_u64_from_buf(buf, 16)?;
+
+        Ok(FileBlockRequest {
+            file_id,
+            block_id,
+            block_size,
+        })
     }
-}
-
-/// Decode the file block request from the buffer.
-pub fn decode_file_block_request(buf: &[u8]) -> Result<FileBlockRequest, RpcError<String>> {
-    if buf.len() < 32 {
-        return Err(RpcError::InternalError("Insufficient bytes".to_owned()));
-    }
-    let seq = get_u64_from_buf(buf, 0)?;
-    let file_id = get_u64_from_buf(buf, 8)?;
-    let block_id = get_u64_from_buf(buf, 16)?;
-    let block_size = get_u64_from_buf(buf, 24)?;
-
-    Ok(FileBlockRequest {
-        seq,
-        file_id,
-        block_id,
-        block_size,
-    })
-}
-
-/// Encode the file block request into a buffer.
-#[must_use]
-pub fn encode_file_block_request(req: &FileBlockRequest) -> Vec<u8> {
-    let mut buf = BytesMut::new();
-    buf.put_u64(req.seq.to_be());
-    buf.put_u64(req.file_id.to_be());
-    buf.put_u64(req.block_id.to_be());
-    buf.put_u64(req.block_size.to_be());
-    buf.to_vec()
 }
 
 /// The response to a file block request.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FileBlockResponse {
-    /// The sequence number of the response.
-    pub seq: u64,
     /// The file ID.
     pub file_id: u64,
     /// The block ID.
@@ -224,66 +129,56 @@ pub struct FileBlockResponse {
 
 impl Encode for FileBlockResponse {
     /// Encode the file block response into a byte buffer.
-    fn encode(&self) -> Vec<u8> {
-        encode_file_block_response(self)
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u64(self.file_id.to_le());
+        buf.put_u64(self.block_id.to_le());
+        match self.status {
+            StatusCode::Success => buf.put_u8(0),
+            StatusCode::NotFound => buf.put_u8(1),
+            StatusCode::InternalError => buf.put_u8(2),
+            StatusCode::VersionMismatch => buf.put_u8(3),
+        }
+        buf.put_u64(self.block_size.to_le());
+        buf.put_slice(&self.data);
     }
 }
 
 impl Decode for FileBlockResponse {
     //// Decode the byte buffer into a file block response.
-    fn decode(buf: &[u8]) -> Result<Self, RpcError<String>> {
-        decode_file_block_response(buf)
-    }
-}
+    fn decode(buf: &[u8]) -> Result<Self, RpcError> {
+        if buf.len() < 17 {
+            return Err(RpcError::InternalError("Insufficient bytes".to_owned()));
+        }
+        let file_id = get_u64_from_buf(buf, 0)?;
+        let block_id = get_u64_from_buf(buf, 8)?;
+        let status = match buf.get(16) {
+            Some(&0) => StatusCode::Success,
+            Some(&1) => StatusCode::NotFound,
+            Some(&2) => StatusCode::InternalError,
+            Some(&3) => StatusCode::VersionMismatch,
+            _ => return Err(RpcError::InternalError("Invalid status code".to_owned())),
+        };
+        let block_size = get_u64_from_buf(buf, 17)?;
+        let data = buf.get(25..).unwrap_or(&[]).to_vec();
+        let data_len = usize_to_u64(data.len());
+        if data_len != block_size {
+            return Err(RpcError::InternalError(format!(
+                "Insufficient block size {data_len}"
+            )));
+        }
 
-/// Decode the file block response from the buffer.
-pub fn decode_file_block_response(buf: &[u8]) -> Result<FileBlockResponse, RpcError<String>> {
-    if buf.len() < 32 {
-        return Err(RpcError::InternalError("Insufficient bytes".to_owned()));
+        Ok(FileBlockResponse {
+            file_id,
+            block_id,
+            block_size,
+            status,
+            data,
+        })
     }
-    let seq = get_u64_from_buf(buf, 0)?;
-    let file_id = get_u64_from_buf(buf, 8)?;
-    let block_id = get_u64_from_buf(buf, 16)?;
-    let status = match buf.get(24) {
-        Some(&0) => StatusCode::Success,
-        Some(&1) => StatusCode::NotFound,
-        Some(&2) => StatusCode::InternalError,
-        Some(&3) => StatusCode::VersionMismatch,
-        _ => return Err(RpcError::InternalError("Invalid status code".to_owned())),
-    };
-    let block_size = get_u64_from_buf(buf, 25)?;
-    let data = buf.get(33..).unwrap_or(&[]).to_vec();
-
-    Ok(FileBlockResponse {
-        seq,
-        file_id,
-        block_id,
-        block_size,
-        status,
-        data,
-    })
-}
-
-/// Encode the file block response into a buffer.
-#[must_use]
-pub fn encode_file_block_response(resp: &FileBlockResponse) -> Vec<u8> {
-    let mut buf = BytesMut::new();
-    buf.put_u64(resp.seq.to_be());
-    buf.put_u64(resp.file_id.to_be());
-    buf.put_u64(resp.block_id.to_be());
-    match resp.status {
-        StatusCode::Success => buf.put_u8(0),
-        StatusCode::NotFound => buf.put_u8(1),
-        StatusCode::InternalError => buf.put_u8(2),
-        StatusCode::VersionMismatch => buf.put_u8(3),
-    }
-    buf.put_u64(resp.block_size.to_be());
-    buf.extend(&resp.data);
-    buf.to_vec()
 }
 
 /// The status code of the response.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum StatusCode {
     /// The request is successful.
     Success,
@@ -299,5 +194,127 @@ impl Default for StatusCode {
     /// Get the default status code.
     fn default() -> Self {
         Self::Success
+    }
+}
+
+/// The file block packet for client
+/// This struct impl packet trait and support file request and response
+#[derive(Debug, Clone)]
+pub struct FileBlockPacket {
+    /// The sequence number of the packet.
+    pub seq: u64,
+    /// The operation type of the packet.
+    pub op: u8,
+    /// The timestamp of the packet.
+    pub timestamp: u64,
+    /// The file block request struct.
+    pub request: FileBlockRequest,
+    /// The buffer of the packet, used to store response data.
+    pub response: Option<FileBlockResponse>,
+    /// The sender to send response back to caller.
+    pub done_tx: flume::Sender<Result<FileBlockResponse, FileBlockRequest>>,
+}
+
+impl FileBlockPacket {
+    /// Create a new file block packet.
+    #[must_use]
+    pub fn new(
+        block_request: &FileBlockRequest,
+        done_tx: flume::Sender<Result<FileBlockResponse, FileBlockRequest>>,
+    ) -> Self {
+        Self {
+            // Will be auto set by client
+            seq: 0,
+            // Set operation
+            op: ReqType::FileBlockRequest.to_u8(),
+            request: block_request.clone(),
+            timestamp: 0,
+            response: None,
+            done_tx,
+        }
+    }
+}
+
+impl Encode for FileBlockPacket {
+    /// Encode the file block packet into a byte buffer.
+    fn encode(&self, buffer: &mut BytesMut) {
+        self.request.encode(buffer);
+    }
+}
+
+#[async_trait]
+impl Packet for FileBlockPacket {
+    /// Get the sequence number of the packet.
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Set the sequence number of the packet.
+    fn set_seq(&mut self, seq: u64) {
+        self.seq = seq;
+    }
+
+    /// Get the operation type of the packet.
+    fn op(&self) -> u8 {
+        self.op
+    }
+
+    /// Set the operation type of the packet.
+    fn set_op(&mut self, op: u8) {
+        self.op = op;
+    }
+
+    /// Get the timestamp of the packet.
+    fn set_timestamp(&mut self, timestamp: u64) {
+        self.timestamp = timestamp;
+    }
+
+    /// get the timestamp of the packet.
+    fn get_timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    /// Set response data to current packet
+    fn set_resp_data(&mut self, data: &[u8]) -> Result<(), RpcError> {
+        self.response = Some(FileBlockResponse::decode(data)?);
+        Ok(())
+    }
+
+    /// Get the response data of the packet.
+    async fn set_result(self, status: Result<(), RpcError>) {
+        match status {
+            Ok(()) => {
+                if let Some(resp) = self.response {
+                    match self.done_tx.send_async(Ok(resp)).await {
+                        Ok(()) => {}
+                        Err(err) => {
+                            error!("Failed to set result: {:?}", err);
+                        }
+                    }
+                } else {
+                    error!("Failed to set result: response is None");
+                    match self.done_tx.send_async(Err(self.request.clone())).await {
+                        Ok(()) => {}
+                        Err(err) => {
+                            error!("Failed to set result: {:?}", err);
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                error!("Failed to set result: {:?}", err);
+                match self.done_tx.send_async(Err(self.request.clone())).await {
+                    Ok(()) => {}
+                    Err(err) => {
+                        error!("Failed to set result: {:?}", err);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get request size to construct request header
+    fn get_req_len(&self) -> u64 {
+        usize_to_u64(mem::size_of_val(&self.request))
     }
 }

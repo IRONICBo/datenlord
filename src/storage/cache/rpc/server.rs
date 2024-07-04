@@ -13,78 +13,18 @@ use tokio::{
     task,
 };
 
-use crate::{async_fuse::util::usize_to_u64, read_exact_timeout, write_all_timeout};
+use crate::{read_exact_timeout, write_all_timeout};
 
 use super::{
     common::ServerTimeoutOptions,
     error::RpcError,
-    message::{
-        decode_file_block_request, FileBlockRequest, FileBlockResponse, ReqType, RespType,
-        StatusCode,
-    },
+    message::{ReqType, RespType},
     packet::{Decode, Encode, ReqHeader, RespHeader, REQ_HEADER_SIZE},
     utils::u64_to_usize,
-    workerpool::{Job, WorkerPool},
+    workerpool::WorkerPool,
 };
 
 use tracing::{debug, error, info};
-
-/// The handler for the RPC file block request.
-#[derive(Debug)]
-pub struct FileBlockHandler {
-    /// The file block request.
-    request: FileBlockRequest,
-    /// The channel for sending the response.
-    done_tx: mpsc::Sender<Vec<u8>>,
-}
-
-impl FileBlockHandler {
-    /// Create a new file block handler.
-    #[must_use]
-    pub fn new(request: FileBlockRequest, done_tx: mpsc::Sender<Vec<u8>>) -> Self {
-        Self { request, done_tx }
-    }
-}
-
-#[async_trait]
-impl Job for FileBlockHandler {
-    async fn run(&self) {
-        debug!("RpcServerHandler::run");
-        // Mock: serve block request and send response
-        let size = self.request.block_size;
-
-        // Prepare response body
-        // Mock: response body is all zeros
-        let file_block_resp = FileBlockResponse {
-            seq: self.request.seq,
-            file_id: self.request.file_id,
-            block_id: self.request.block_id,
-            block_size: size,
-            status: StatusCode::Success,
-            data: vec![0_u8; u64_to_usize(size)],
-        };
-        let resp_body = file_block_resp.encode();
-        // Prepare response header
-        let resp_header = RespHeader {
-            seq: self.request.seq,
-            op: RespType::FileBlockResponse.to_u8(),
-            len: usize_to_u64(resp_body.len()),
-        };
-        let mut resp_buffer = resp_header.encode();
-        // Combine response header and body
-        resp_buffer.extend_from_slice(&resp_body);
-
-        // Send response to the done channel
-        match self.done_tx.send(resp_buffer).await {
-            Ok(()) => {
-                debug!("Sent response to done channel");
-            }
-            Err(err) => {
-                error!("Failed to send response to done channel: {:?}", err);
-            }
-        }
-    }
-}
 
 /// Define trait for implementing the RPC server connection handler.
 #[async_trait]
@@ -98,65 +38,6 @@ pub trait RpcServerConnectionHandler {
     );
 }
 
-/// The file block handler for the RPC server.
-#[derive(Clone, Debug)]
-pub struct FileBlockRpcServerHandler {
-    /// The worker pool for the RPC server.
-    worker_pool: Arc<WorkerPool>,
-}
-
-impl FileBlockRpcServerHandler {
-    /// Create a new file block RPC server handler.
-    #[must_use]
-    pub fn new(worker_pool: Arc<WorkerPool>) -> Self {
-        Self { worker_pool }
-    }
-}
-
-#[async_trait]
-impl RpcServerConnectionHandler for FileBlockRpcServerHandler {
-    async fn dispatch(
-        &self,
-        req_header: ReqHeader,
-        req_buffer: &[u8],
-        done_tx: mpsc::Sender<Vec<u8>>,
-    ) {
-        // Dispatch the handler for the connection
-        if let Ok(req_type) = ReqType::from_u8(req_header.op) {
-            if let ReqType::KeepAliveRequest = req_type {
-                // Try to read the request body
-                // Decode the request body
-                let req_body = match decode_file_block_request(req_buffer) {
-                    Ok(req) => req,
-                    Err(err) => {
-                        debug!("Failed to decode file block request: {:?}", err);
-                        return;
-                    }
-                };
-
-                // File block request
-                // Submit the handler to the worker pool
-                // When the handler is done, send the response to the done channel
-                // Response need to contain the response header and body
-                let handler = FileBlockHandler::new(req_body, done_tx.clone());
-                if let Ok(()) = self
-                    .worker_pool
-                    .submit_job(Box::new(handler))
-                    .map_err(|err| {
-                        debug!("Failed to submit job: {:?}", err);
-                    })
-                {
-                    debug!("Submitted job to worker pool");
-                }
-            } else {
-                debug!(
-                    "FileBlockRpcServerHandler: Inner request type is not matched: {:?}",
-                    req_header.op
-                );
-            }
-        }
-    }
-}
 /// The connection for the RPC server.
 #[derive(Clone, Debug)]
 pub struct RpcServerConnection<T>
@@ -223,7 +104,7 @@ where
     }
 
     /// Recv request header from the stream
-    pub async fn recv_header(&self) -> Result<ReqHeader, RpcError<String>> {
+    pub async fn recv_header(&self) -> Result<ReqHeader, RpcError> {
         // Try to read to buffer
         match self.recv_len(REQ_HEADER_SIZE).await {
             Ok(()) => {}
@@ -241,7 +122,7 @@ where
     }
 
     /// Recv request body from the stream
-    pub async fn recv_len(&self, len: u64) -> Result<(), RpcError<String>> {
+    pub async fn recv_len(&self, len: u64) -> Result<(), RpcError> {
         let mut req_buffer: &mut BytesMut = unsafe { &mut *self.req_buf.get() };
         req_buffer.resize(u64_to_usize(len), 0);
         let reader = self.get_stream_mut();
@@ -260,11 +141,11 @@ where
 
     /// Send response to the stream
     /// The response is a byte array, contains the response header and body.
-    pub async fn send_response(&self, resp: &[u8]) -> Result<(), RpcError<String>> {
+    pub async fn send_response(&self, resp: &[u8]) -> Result<(), RpcError> {
         let writer = self.get_stream_mut();
         match write_all_timeout!(writer, resp, self.timeout_options.write_timeout).await {
             Ok(()) => {
-                debug!("Sent response: {:?}", resp.len());
+                debug!("Sent response successfully: {:?}", resp.len());
                 Ok(())
             }
             Err(err) => {
@@ -321,8 +202,10 @@ where
                     op: RespType::KeepAliveResponse.to_u8(),
                     len: 0,
                 };
-                let resp_buffer = RespHeader::encode(&resp_header);
-                if let Ok(res) = self.inner.send_response(&resp_buffer).await {
+                // Only one process will access this buffer, so we can use this buffer directly.
+                let resp_buffer: &mut BytesMut = unsafe { &mut *self.inner.req_buf.get() };
+                RespHeader::encode(&resp_header, resp_buffer);
+                if let Ok(res) = self.inner.send_response(resp_buffer).await {
                     debug!("Sent keepalive response: {:?}", res);
                 } else {
                     error!("Failed to send keepalive response");
@@ -354,7 +237,7 @@ where
     /// Keep the connection and get the handler for the connection.
     pub async fn run(&self) {
         // Dispatch the handler for the connection
-        debug!("RpcServerConnection::run");
+        debug!("RpcServerConnection::Received a new TcpStream.");
 
         // TODO: copy done_tx to the worker pool
         let (done_tx, mut done_rx) = mpsc::channel::<Vec<u8>>(10000);
@@ -369,7 +252,7 @@ where
                     debug!("Recv buffer from done_tx channel, try to send response to the stream");
                     // Send response to the stream
                     if let Ok(res) = inner_conn.send_response(&resp_buffer).await {
-                        debug!("Sent file block response: {:?}", res);
+                        debug!("Sent file block response successfully: {:?}", res);
                     } else {
                         error!("Failed to send file block response");
                     }
@@ -418,7 +301,7 @@ where
 
 impl<T> RpcConnWorkerFactory<T>
 where
-    T: RpcServerConnectionHandler + Send + Sync + Clone + 'static,
+    T: RpcServerConnectionHandler + Send + Sync + Debug + Clone + 'static,
 {
     /// Create a new worker factory for the RPC connection.
     pub fn new(max_workers: usize, max_jobs: usize, dispatch_handler: T) -> Self {
@@ -426,6 +309,11 @@ where
             worker_pool: Arc::new(WorkerPool::new(max_workers, max_jobs)),
             dispatch_handler,
         }
+    }
+
+    /// Get dispatch handler for the connection.
+    pub fn get_dispatch_handler(&self) -> T {
+        self.dispatch_handler.clone()
     }
 
     /// Serve the connection.
@@ -440,7 +328,7 @@ where
 /// The RPC server definition.
 pub struct RpcServer<T>
 where
-    T: RpcServerConnectionHandler + Send + Sync + Clone + 'static,
+    T: RpcServerConnectionHandler + Send + Sync + Debug + Clone + 'static,
 {
     /// Options for the timeout of the server connection
     timeout_options: ServerTimeoutOptions,
@@ -450,18 +338,21 @@ where
     rpc_conn_worker_factory: RpcConnWorkerFactory<T>,
 }
 
-impl Debug for RpcServer<FileBlockRpcServerHandler> {
+impl<T> Debug for RpcServer<T>
+where
+    T: RpcServerConnectionHandler + Send + Sync + Debug + Clone + 'static,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RpcServer")
             .field("timeout_options", &self.timeout_options)
             .field("main_worker", &self.main_worker)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl<T> RpcServer<T>
 where
-    T: RpcServerConnectionHandler + Send + Sync + Clone + 'static,
+    T: RpcServerConnectionHandler + Send + Sync + Debug + Clone + 'static,
 {
     /// Create a new RPC server.
     pub fn new(
@@ -482,7 +373,7 @@ where
     }
 
     /// Start the RPC server.
-    pub async fn listen(&mut self, addr: &str) -> Result<(), RpcError<String>> {
+    pub async fn listen(&mut self, addr: &str) -> Result<(), RpcError> {
         // Start the server
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -510,7 +401,7 @@ where
                             stream,
                             Arc::clone(&factory.worker_pool),
                             conn_timeout_options,
-                            factory.dispatch_handler.clone(),
+                            factory.get_dispatch_handler(),
                         ));
                     }
                     Err(err) => {
@@ -540,12 +431,11 @@ mod tests {
     use tokio::time;
 
     use super::*;
-    use std::net::TcpStream;
     use std::time::Duration;
 
     /// Check if the port is in use
-    fn is_port_in_use(addr: &str) -> bool {
-        if let Ok(stream) = TcpStream::connect(addr) {
+    async fn is_port_in_use(addr: &str) -> bool {
+        if let Ok(stream) = tokio::net::TcpStream::connect(addr).await {
             // Port is in use
             drop(stream);
             true
@@ -555,95 +445,40 @@ mod tests {
         }
     }
 
+    /// Test handler for the RPC server connection.
+    #[derive(Clone, Debug)]
+    struct TestHandler;
+
+    impl TestHandler {
+        /// Create a new test handler.
+        pub fn new() -> Self {
+            Self {}
+        }
+    }
+
+    #[async_trait]
+    impl RpcServerConnectionHandler for TestHandler {
+        async fn dispatch(
+            &self,
+            _req_header: ReqHeader,
+            _req_buffer: &[u8],
+            _done_tx: mpsc::Sender<Vec<u8>>,
+        ) {
+            // Dispatch the handler for the connection
+            debug!("Dispatched handler for the connection");
+        }
+    }
+
     #[tokio::test]
     async fn test_rpc_server() {
-        let addr = "127.0.0.1:2788";
-        let pool = Arc::new(WorkerPool::new(4, 100));
-        let handler = FileBlockRpcServerHandler::new(Arc::clone(&pool));
+        let addr = "127.0.0.1:2888";
+        let handler = TestHandler::new();
         let mut server = RpcServer::new(&ServerTimeoutOptions::default(), 4, 100, handler);
         server.listen(addr).await.unwrap();
         time::sleep(Duration::from_secs(1)).await;
-        assert!(is_port_in_use(addr));
+        assert!(is_port_in_use(addr).await);
         server.stop();
         time::sleep(Duration::from_secs(1)).await;
-        assert!(!is_port_in_use(addr));
+        assert!(!is_port_in_use(addr).await);
     }
-
-    // #[tokio::test]
-    // async fn test_recv_header_success() {
-    //     // Setup the mock TcpStream using Tokio's utilities or external mocking libraries
-    //     let mock_stream = mock_tcp_stream_with_header_data().await;  // Assuming this function is implemented to mock header data
-
-    //     let worker_pool = Arc::new(WorkerPool::new(1, 1));
-    //     let handler = FileBlockRpcServerHandler::new(worker_pool.clone());
-    //     let connection_inner = RpcServerConnectionInner::new(mock_stream, worker_pool, ServerTimeoutOptions::default(), handler);
-
-    //     let result = connection_inner.recv_header().await;
-    //     assert!(result.is_ok());
-    //     let header = result.unwrap();
-    //     assert_eq!(header.seq, expected_seq);
-    //     assert_eq!(header.op, expected_op);
-    // }
-
-    // #[tokio::test]
-    // async fn test_recv_len_success() {
-    //     let mock_stream = mock_tcp_stream_with_specific_length_data(1024).await; // Mock function setup
-
-    //     let worker_pool = Arc::new(WorkerPool::new(1, 1));
-    //     let handler = FileBlockRpcServerHandler::new(worker_pool.clone());
-    //     let connection_inner = RpcServerConnectionInner::new(mock_stream, worker_pool, ServerTimeoutAllocations::default(), handler);
-
-    //     let result = connection_inner.recv_len(1024).await;
-    //     assert!(result.is_ok());
-    // }
-
-    // #[tokio::test]
-    // async fn test_dispatch_file_block_request() {
-    //     let (done_tx, _) = mpsc::channel::<Vec<u8>>(1);
-    //     let worker_pool = Arc::new(WorkerPool::new(1, 1));
-    //     let handler = FileBlockRpcServerHandler::new(worker_pool.clone());
-    //     let stream = tokio::net::TcpStream::connect("localhost:12345").await.unwrap(); // This should be a mock
-    //     let connection = RpcServerConnection::new(stream, worker + pool, ServerTimeoutOptions::default(), handler);
-
-    //     let req_header = ReqHeader {
-    //         seq: 1,
-    //         op: ReqType::FileBlockRequest.to_u8(),
-    //         len: 1024,
-    //     };
-
-    //     // Setup mocking for expected behavior, perhaps using a mock library or fixtures
-    //     connection.dispatch(req_with_header, done_tx).await;
-
-    //     // Assertions to validate correct handler was used
-    // }
-
-    // #[tokio::test]
-    // async fn test_server_connection_run() {
-    //     let worker_pool = Arc::new(WorkerPool::new(1, 1));
-    //     let handler = FileBlockRpcServerHandler::new(worker_pool.clone());
-    //     let stream = mock_tcp_stream().await; // Needs proper setup for continuous requests
-
-    //     let server_connection = RpcServerConnection::new(stream, worker_pool, ServerTimeoutOptions::default(), handler);
-    //     server_connection.run().await;
-
-    //     // Assertions to check the flow of handling and mock verifications
-    // }
-
-    // #[tokio::test]
-    // async fn test_rpc_server_listen() {
-    //     let mut server = setup_rpc_server().await;  // Assumes a setup function
-    //     let result = server.listen("127.0.0.1:8080").await;
-    //     assert!(result.is_ok());
-
-    //     // Additional assertions to check that the server is listening and can accept connections
-    // }
-
-    // #[tokio::test]
-    // async fn test_rpc_server_stop() {
-    //     let mut server = setup_rpc_server().await; // Setup server with necessary handlers and worker pools
-    //     server.listen("127.0.0.1:8080").await.unwrap();
-    //     server.stop().await;
-
-    //     // Verify that the server has stopped accepting new connections and all handlers are shutdown
-    // }
 }
