@@ -76,7 +76,7 @@ mod tests {
     use workerpool::{Job, WorkerPool};
 
     use crate::async_fuse::util::usize_to_u64;
-    use crate::storage::cache::rpc::packet::PacketStatus;
+    use crate::storage::distribute_cache::rpc::packet::PacketStatus;
 
     use super::*;
 
@@ -119,6 +119,8 @@ mod tests {
                 file_id: self.request.file_id,
                 block_id: self.request.block_id,
                 block_size: size,
+                block_version: self.request.block_version,
+                hash_ring_version: self.request.hash_ring_version,
                 status: StatusCode::Success,
                 data: vec![0_u8; u64_to_usize(size)],
             };
@@ -337,6 +339,8 @@ mod tests {
             block_id: 0,
             block_size: 4096,
             file_id: 0,
+            block_version: 0,
+            hash_ring_version: 0,
         };
         let mut packet = TestFilePacket::new(&block_request);
         rpc_client.send_request(&mut packet).await.unwrap();

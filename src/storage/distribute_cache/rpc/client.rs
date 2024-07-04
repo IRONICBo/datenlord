@@ -461,8 +461,8 @@ where
 mod tests {
     use tokio::net::TcpListener;
 
-    use crate::storage::cache::rpc::packet::PacketStatus;
-    use crate::storage::cache::rpc::setup;
+    use crate::storage::distribute_cache::rpc::packet::PacketStatus;
+    use crate::storage::distribute_cache::rpc::setup;
 
     use super::*;
     use std::time::Duration;

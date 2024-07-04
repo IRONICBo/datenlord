@@ -79,6 +79,13 @@ pub struct FileBlockRequest {
     pub block_id: u64,
     /// The block size.
     pub block_size: u64,
+    /// The block version
+    pub block_version: u64,
+    /// The hashring version
+    /// The latest hashring version
+    /// We will return current hashring version in rpc server,
+    /// client will check if the hashring version is old as the latest one.
+    pub hash_ring_version: u64,
 }
 
 impl Encode for FileBlockRequest {
@@ -97,17 +104,21 @@ impl Decode for FileBlockRequest {
 
 /// Decode the file block request from the buffer.
 pub fn decode_file_block_request(buf: &[u8]) -> Result<FileBlockRequest, RpcError<String>> {
-    if buf.len() < 24 {
+    if buf.len() < 32 {
         return Err(RpcError::InternalError("Insufficient bytes".to_owned()));
     }
     let file_id = get_u64_from_buf(buf, 0)?;
     let block_id = get_u64_from_buf(buf, 8)?;
     let block_size = get_u64_from_buf(buf, 16)?;
+    let block_version = get_u64_from_buf(buf, 24)?;
+    let hash_ring_version = get_u64_from_buf(buf, 32)?;
 
     Ok(FileBlockRequest {
         file_id,
         block_id,
         block_size,
+        block_version,
+        hash_ring_version,
     })
 }
 
@@ -118,6 +129,8 @@ pub fn encode_file_block_request(req: &FileBlockRequest) -> Vec<u8> {
     buf.put_u64(req.file_id.to_be());
     buf.put_u64(req.block_id.to_be());
     buf.put_u64(req.block_size.to_be());
+    buf.put_u64(req.block_version.to_be());
+    buf.put_u64(req.hash_ring_version.to_be());
     buf.to_vec()
 }
 
@@ -130,6 +143,13 @@ pub struct FileBlockResponse {
     pub block_id: u64,
     /// The block size.
     pub block_size: u64,
+    /// The block version
+    pub block_version: u64,
+    /// The hashring version
+    /// The latest hashring version
+    /// We will return current hashring version in rpc server,
+    /// client will check if the hashring version is old as the latest one.
+    pub hash_ring_version: u64,
     /// The status of the response.
     pub status: StatusCode,
     /// The data of the block.
@@ -152,20 +172,22 @@ impl Decode for FileBlockResponse {
 
 /// Decode the file block response from the buffer.
 pub fn decode_file_block_response(buf: &[u8]) -> Result<FileBlockResponse, RpcError<String>> {
-    if buf.len() < 17 {
+    if buf.len() < 41 {
         return Err(RpcError::InternalError("Insufficient bytes".to_owned()));
     }
     let file_id = get_u64_from_buf(buf, 0)?;
     let block_id = get_u64_from_buf(buf, 8)?;
-    let status = match buf.get(16) {
+    let block_size = get_u64_from_buf(buf, 16)?;
+    let block_version = get_u64_from_buf(buf, 24)?;
+    let hash_ring_version = get_u64_from_buf(buf, 32)?;
+    let status = match buf.get(40) {
         Some(&0) => StatusCode::Success,
         Some(&1) => StatusCode::NotFound,
         Some(&2) => StatusCode::InternalError,
         Some(&3) => StatusCode::VersionMismatch,
         _ => return Err(RpcError::InternalError("Invalid status code".to_owned())),
     };
-    let block_size = get_u64_from_buf(buf, 17)?;
-    let data = buf.get(25..).unwrap_or(&[]).to_vec();
+    let data = buf.get(41..).unwrap_or(&[]).to_vec();
     let data_len = usize_to_u64(data.len());
     if data_len != block_size {
         return Err(RpcError::InternalError(format!(
@@ -177,6 +199,8 @@ pub fn decode_file_block_response(buf: &[u8]) -> Result<FileBlockResponse, RpcEr
         file_id,
         block_id,
         block_size,
+        block_version,
+        hash_ring_version,
         status,
         data,
     })
@@ -188,13 +212,15 @@ pub fn encode_file_block_response(resp: &FileBlockResponse) -> Vec<u8> {
     let mut buf = BytesMut::new();
     buf.put_u64(resp.file_id.to_be());
     buf.put_u64(resp.block_id.to_be());
+    buf.put_u64(resp.block_size.to_be());
+    buf.put_u64(resp.block_version.to_be());
+    buf.put_u64(resp.hash_ring_version.to_be());
     match resp.status {
         StatusCode::Success => buf.put_u8(0),
         StatusCode::NotFound => buf.put_u8(1),
         StatusCode::InternalError => buf.put_u8(2),
         StatusCode::VersionMismatch => buf.put_u8(3),
     }
-    buf.put_u64(resp.block_size.to_be());
     buf.put_slice(&resp.data);
 
     buf.to_vec()
