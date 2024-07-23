@@ -87,6 +87,8 @@ mod tests {
                 file_id: self.request.file_id,
                 block_id: self.request.block_id,
                 block_size: size,
+                block_version: self.request.block_version,
+                hash_ring_version: self.request.hash_ring_version,
                 status: StatusCode::Success,
                 data: vec![0_u8; u64_to_usize(size)],
             };
@@ -216,7 +218,7 @@ mod tests {
             .await
             .unwrap();
 
-        let rpc_client = RpcClient::<FileBlockPacket>::new(connect_stream, &timeout_options);
+        let rpc_client = RpcClient::<FileBlockPacket>::new(connect_stream, timeout_options);
         rpc_client.start_recv();
 
         time::sleep(Duration::from_secs(1)).await;
@@ -230,6 +232,8 @@ mod tests {
             block_id: 0,
             block_size: 4096,
             file_id: 0,
+            block_version: 0,
+            hash_ring_version: 1,
         };
         let mut packet = FileBlockPacket::new(&block_request, tx.clone());
         rpc_client.send_request(&mut packet).await.unwrap();
@@ -282,7 +286,7 @@ mod tests {
             .await
             .unwrap();
 
-        let rpc_client = RpcClient::<FileBlockPacket>::new(connect_stream, &timeout_options);
+        let rpc_client = RpcClient::<FileBlockPacket>::new(connect_stream, timeout_options);
         rpc_client.start_recv();
 
         time::sleep(Duration::from_secs(5)).await;
@@ -317,7 +321,7 @@ mod tests {
             .await
             .unwrap();
 
-        let rpc_client = RpcClient::<FileBlockPacket>::new(connect_stream, &timeout_options);
+        let rpc_client = RpcClient::<FileBlockPacket>::new(connect_stream, timeout_options);
         rpc_client.start_recv();
 
         // Drop client
