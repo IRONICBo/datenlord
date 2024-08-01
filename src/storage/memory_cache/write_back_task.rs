@@ -181,6 +181,7 @@ where
                 if shutdown {
                     error!("Trying to flush a file after shutdown.");
                 } else {
+                    println!("Flush file block: ino={}, block_id={}", ino, block_id);
                     let res = self
                         .block_flush_spawn_handle
                         .spawn(|_| {
@@ -260,6 +261,7 @@ where
                 block,
                 tx,
             } => {
+                println!("Store block: ino={}, block_id={}", ino, block_id);
                 // Add the block to `lru_queue` and `pending_blocks`
                 self.lru_queue.insert(BlockCoordinate(ino, block_id));
                 self.pending_blocks
@@ -292,6 +294,7 @@ where
             if interval.period() != new_period {
                 interval = tokio::time::interval(new_period);
             }
+            println!("New period: {:?}", new_period);
 
             select! {
                 command = self.command_receiver.recv() => {

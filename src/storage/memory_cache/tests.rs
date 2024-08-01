@@ -30,7 +30,7 @@ async fn prepare_empty_storage() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) {
     (backend, cache)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_write_whole_block() {
     let ino = 0;
     let block_id = 0;
@@ -48,7 +48,7 @@ async fn test_write_whole_block() {
     assert_eq!(loaded_from_backend.as_slice(), loaded_from_cache.as_slice());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_overwrite() {
     let ino = 0;
     let block_id = 0;
@@ -69,7 +69,7 @@ async fn test_overwrite() {
     assert_eq!(loaded.as_slice(), b"bar foo ");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_load_inexist_block() {
     let ino = 0;
     let block_id = 0;
@@ -83,7 +83,7 @@ async fn test_load_inexist_block() {
     assert!(block.is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_append() {
     let ino = 0;
 
@@ -99,7 +99,7 @@ async fn test_append() {
     assert_eq!(loaded.as_slice(), b"xxx \0\0\0\0");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_remove() {
     let ino = 0;
     let block_id = 0;
@@ -152,7 +152,7 @@ async fn prepare_data_for_evict() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) 
     (backend, cache)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_evict() {
     let (backend, cache) = prepare_data_for_evict().await;
 
@@ -165,7 +165,7 @@ async fn test_evict() {
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_touch_by_load() {
     let (backend, cache) = prepare_data_for_evict().await;
 
@@ -182,7 +182,7 @@ async fn test_touch_by_load() {
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_touch_by_store() {
     let (backend, cache) = prepare_data_for_evict().await;
 
@@ -200,7 +200,7 @@ async fn test_touch_by_store() {
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_evict_dirty_block() {
     let (backend, cache) = prepare_empty_storage().await;
 
@@ -223,7 +223,7 @@ async fn test_evict_dirty_block() {
     assert!(!backend.contains(0, 0));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_flush() {
     let ino = 0;
     let block_id = 0;
@@ -240,7 +240,7 @@ async fn test_flush() {
     assert!(backend.flushed(ino));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_load_from_backend() {
     let ino = 0;
     let block_id = 0;
@@ -258,7 +258,7 @@ async fn test_load_from_backend() {
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_write_missing_block_in_middle() {
     let (_, cache) = prepare_empty_storage().await;
 
@@ -269,7 +269,7 @@ async fn test_write_missing_block_in_middle() {
     assert_eq!(loaded.as_slice(), block.as_slice());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_truncate() {
     let ino = 0;
     let from_block = 8;
@@ -295,7 +295,7 @@ async fn test_truncate() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_truncate_may_fill() {
     let ino = 0;
     let from_block = 8;
@@ -319,7 +319,7 @@ async fn test_truncate_may_fill() {
     assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_truncate_in_the_same_block() {
     let (_, cache) = prepare_empty_storage().await;
 
@@ -332,7 +332,7 @@ async fn test_truncate_in_the_same_block() {
     assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_write_out_of_range() {
     let (_, cache) = prepare_empty_storage().await;
 
@@ -365,7 +365,7 @@ async fn prepare_empty_storage_with_write_back() -> (Arc<MemoryStorage>, Arc<Mem
     (backend, cache)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_store_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
@@ -385,7 +385,7 @@ async fn test_store_write_back() {
     assert!(backend.contains(0, 1));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_evict_dirty_block_with_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
@@ -408,17 +408,22 @@ async fn test_evict_dirty_block_with_write_back() {
     assert!(backend.contains(0, 0));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_truncate_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
     for block_id in 0..4 {
         let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
         block.set_dirty(true);
+        println!("block_id: {}", block_id);
         cache.store(0, block_id, block).await.unwrap();
     }
 
     cache.flush(0).await.unwrap();
+    // Sleep for a while to make sure the write back task has been executed
+    // tokio::time::sleep(Duration::from_secs(5)).await;
+    println!("1. cache {:#?}", cache);
+    println!("1. backend {:#?}", backend);
 
     cache.truncate(0, 4, 2, BLOCK_SIZE_IN_BYTES).await.unwrap();
 
@@ -426,13 +431,20 @@ async fn test_truncate_write_back() {
     assert!(backend.contains(0, 3));
 
     cache.flush(0).await.unwrap();
+    // Sleep for a while to make sure the write back task has been executed
+    // tokio::time::sleep(Duration::from_secs(5)).await;
+    println!("2. cache {:#?}", backend);
+    println!("2. backend {:#?}", backend);
+
     assert!(!backend.contains(0, 2));
     assert!(!backend.contains(0, 3));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_truncate_in_middle_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
+
+    println!("1. {:#?}", backend);
 
     for block_id in 0..8 {
         let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
@@ -457,7 +469,12 @@ async fn test_truncate_in_middle_write_back() {
     let loaded = cache.load(0, 6).await.unwrap().unwrap();
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 
+    println!("2. {:#?}", backend);
+
     cache.flush(0).await.unwrap();
+
+    println!("3. {:#?}", backend);
+
     assert!(!backend.contains(0, 2));
     assert!(!backend.contains(0, 3));
     assert!(backend.contains(0, 4));
@@ -466,7 +483,7 @@ async fn test_truncate_in_middle_write_back() {
     assert!(!backend.contains(0, 7));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_truncate_fill_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
@@ -488,7 +505,7 @@ async fn test_truncate_fill_write_back() {
     assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_write_back_task() {
     let (_, cache) = prepare_empty_storage().await;
 
