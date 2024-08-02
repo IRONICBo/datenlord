@@ -372,6 +372,8 @@ async fn test_store_write_back() {
     let mut block = Block::new_zeroed(BLOCK_SIZE_IN_BYTES);
     block.set_dirty(true);
     cache.store(0, 0, block).await.unwrap();
+    // Wait for the write back task
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let loaded = cache.load(0, 0).await.unwrap();
     assert!(loaded.is_some());
 
@@ -381,6 +383,8 @@ async fn test_store_write_back() {
     let mut block = Block::new_zeroed(BLOCK_SIZE_IN_BYTES);
     block.set_dirty(true);
     cache.store(0, 1, block).await.unwrap();
+    // Wait for the write back task
+    tokio::time::sleep(Duration::from_millis(200)).await;
     cache.flush_all().await.unwrap();
     assert!(backend.contains(0, 1));
 }
@@ -398,6 +402,7 @@ async fn test_evict_dirty_block_with_write_back() {
 
     // Clear the backend
     backend.remove(0).await.unwrap();
+    assert!(!backend.contains(0, 0));
 
     // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
     // All of them are dirty
@@ -416,6 +421,8 @@ async fn test_truncate_write_back() {
         let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
         block.set_dirty(true);
         cache.store(0, block_id, block).await.unwrap();
+        // Wait for the write back task
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     cache.flush(0).await.unwrap();
@@ -438,6 +445,8 @@ async fn test_truncate_in_middle_write_back() {
         let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
         block.set_dirty(true);
         cache.store(0, block_id, block).await.unwrap();
+        // Wait for the write back task
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     cache.flush(0).await.unwrap();
@@ -447,10 +456,14 @@ async fn test_truncate_in_middle_write_back() {
     let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
     block.set_dirty(true);
     cache.store(0, 4, block).await.unwrap();
+    // Wait for the write back task
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
     block.set_dirty(true);
     cache.store(0, 6, block).await.unwrap();
+    // Wait for the write back task
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let loaded = cache.load(0, 4).await.unwrap().unwrap();
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);

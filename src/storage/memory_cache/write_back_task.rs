@@ -146,24 +146,8 @@ where
                 .get_mut(&ino)
                 .and_then(|file_level_pending_blocks| file_level_pending_blocks.remove(&block_id))
             {
-                if self
-                    .block_flush_spawn_handle
-                    .spawn(|_| {
-                        write_back_one_block(
-                            Arc::clone(&self.storage),
-                            ino,
-                            block_id,
-                            block.clone(),
-                            tx,
-                        )
-                    })
-                    .await
-                    .is_err()
-                {
-                    // Ensure that the block is flushed to the backend, and notify the loop to
-                    // shutdown.
-                    error!("Try to spawn a `BlockFlush` task after shutdown.");
-                }
+                write_back_one_block(Arc::clone(&self.storage), ino, block_id, block.clone(), tx)
+                    .await;
             }
         }
     }
