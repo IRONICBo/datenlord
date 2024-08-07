@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use datenlord::config::SoftLimit;
+use tokio::runtime::Handle;
 
 use super::{MemoryCache, MemoryCacheBuilder};
 use crate::storage::mock::MemoryStorage;
@@ -16,6 +17,100 @@ const BLOCK_CONTENT: &[u8; BLOCK_SIZE_IN_BYTES] = b"foo bar ";
 const CACHE_CAPACITY_IN_BLOCKS: usize = 4;
 
 type MemoryCacheType = MemoryCache<LruPolicy<BlockCoordinate>, Arc<MemoryStorage>>;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_memory_cache() {
+    tracing_subscriber::fmt::init();
+
+    let current_handle = Handle::current();
+    println!("current runtime address: {:#?}, pointer:{:p}", current_handle, &current_handle);
+
+    // serialize all test here to prevent test race
+    test_write_whole_block().await;
+    test_overwrite().await;
+    test_load_inexist_block().await;
+    test_append().await;
+    test_remove().await;
+    test_evict().await;
+    test_touch_by_load().await;
+    test_touch_by_store().await;
+    test_evict_dirty_block().await;
+    test_flush().await;
+    test_load_from_backend().await;
+    test_write_missing_block_in_middle().await;
+    test_truncate().await;
+    test_truncate_may_fill().await;
+    test_truncate_in_the_same_block().await;
+    test_write_out_of_range().await;
+    test_store_write_back().await;
+    test_evict_dirty_block_with_write_back().await;
+    test_truncate_write_back().await;
+    test_truncate_in_middle_write_back().await;
+    test_truncate_fill_write_back().await;
+    test_write_back_task().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_memory_cache2() {
+
+    let current_handle = Handle::current();
+    println!("current runtime address: {:#?}, pointer:{:p}", current_handle, &current_handle);
+
+    // serialize all test here to prevent test race
+    test_write_whole_block().await;
+    test_overwrite().await;
+    test_load_inexist_block().await;
+    test_append().await;
+    test_remove().await;
+    test_evict().await;
+    test_touch_by_load().await;
+    test_touch_by_store().await;
+    test_evict_dirty_block().await;
+    test_flush().await;
+    test_load_from_backend().await;
+    test_write_missing_block_in_middle().await;
+    test_truncate().await;
+    test_truncate_may_fill().await;
+    test_truncate_in_the_same_block().await;
+    test_write_out_of_range().await;
+    test_store_write_back().await;
+    test_evict_dirty_block_with_write_back().await;
+    test_truncate_write_back().await;
+    test_truncate_in_middle_write_back().await;
+    test_truncate_fill_write_back().await;
+    test_write_back_task().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_memory_cache3() {
+
+    let current_handle = Handle::current();
+    println!("current runtime address: {:#?}, pointer:{:p}", current_handle, &current_handle);
+
+    // serialize all test here to prevent test race
+    test_write_whole_block().await;
+    test_overwrite().await;
+    test_load_inexist_block().await;
+    test_append().await;
+    test_remove().await;
+    test_evict().await;
+    test_touch_by_load().await;
+    test_touch_by_store().await;
+    test_evict_dirty_block().await;
+    test_flush().await;
+    test_load_from_backend().await;
+    test_write_missing_block_in_middle().await;
+    test_truncate().await;
+    test_truncate_may_fill().await;
+    test_truncate_in_the_same_block().await;
+    test_write_out_of_range().await;
+    test_store_write_back().await;
+    test_evict_dirty_block_with_write_back().await;
+    test_truncate_write_back().await;
+    test_truncate_in_middle_write_back().await;
+    test_truncate_fill_write_back().await;
+    test_write_back_task().await;
+}
 
 async fn prepare_empty_storage() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) {
     let policy = LruPolicy::<BlockCoordinate>::new(CACHE_CAPACITY_IN_BLOCKS);
@@ -30,7 +125,6 @@ async fn prepare_empty_storage() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) {
     (backend, cache)
 }
 
-#[tokio::test]
 async fn test_write_whole_block() {
     let ino = 0;
     let block_id = 0;
@@ -48,7 +142,6 @@ async fn test_write_whole_block() {
     assert_eq!(loaded_from_backend.as_slice(), loaded_from_cache.as_slice());
 }
 
-#[tokio::test]
 async fn test_overwrite() {
     let ino = 0;
     let block_id = 0;
@@ -69,7 +162,6 @@ async fn test_overwrite() {
     assert_eq!(loaded.as_slice(), b"bar foo ");
 }
 
-#[tokio::test]
 async fn test_load_inexist_block() {
     let ino = 0;
     let block_id = 0;
@@ -83,7 +175,6 @@ async fn test_load_inexist_block() {
     assert!(block.is_none());
 }
 
-#[tokio::test]
 async fn test_append() {
     let ino = 0;
 
@@ -99,7 +190,6 @@ async fn test_append() {
     assert_eq!(loaded.as_slice(), b"xxx \0\0\0\0");
 }
 
-#[tokio::test]
 async fn test_remove() {
     let ino = 0;
     let block_id = 0;
@@ -152,7 +242,6 @@ async fn prepare_data_for_evict() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) 
     (backend, cache)
 }
 
-#[tokio::test]
 async fn test_evict() {
     let (backend, cache) = prepare_data_for_evict().await;
 
@@ -165,7 +254,6 @@ async fn test_evict() {
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 }
 
-#[tokio::test]
 async fn test_touch_by_load() {
     let (backend, cache) = prepare_data_for_evict().await;
 
@@ -182,7 +270,6 @@ async fn test_touch_by_load() {
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 }
 
-#[tokio::test]
 async fn test_touch_by_store() {
     let (backend, cache) = prepare_data_for_evict().await;
 
@@ -200,7 +287,6 @@ async fn test_touch_by_store() {
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 }
 
-#[tokio::test]
 async fn test_evict_dirty_block() {
     let (backend, cache) = prepare_empty_storage().await;
 
@@ -223,7 +309,6 @@ async fn test_evict_dirty_block() {
     assert!(!backend.contains(0, 0));
 }
 
-#[tokio::test]
 async fn test_flush() {
     let ino = 0;
     let block_id = 0;
@@ -240,7 +325,6 @@ async fn test_flush() {
     assert!(backend.flushed(ino));
 }
 
-#[tokio::test]
 async fn test_load_from_backend() {
     let ino = 0;
     let block_id = 0;
@@ -258,7 +342,6 @@ async fn test_load_from_backend() {
     assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 }
 
-#[tokio::test]
 async fn test_write_missing_block_in_middle() {
     let (_, cache) = prepare_empty_storage().await;
 
@@ -269,7 +352,6 @@ async fn test_write_missing_block_in_middle() {
     assert_eq!(loaded.as_slice(), block.as_slice());
 }
 
-#[tokio::test]
 async fn test_truncate() {
     let ino = 0;
     let from_block = 8;
@@ -295,7 +377,6 @@ async fn test_truncate() {
     }
 }
 
-#[tokio::test]
 async fn test_truncate_may_fill() {
     let ino = 0;
     let from_block = 8;
@@ -319,7 +400,6 @@ async fn test_truncate_may_fill() {
     assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
 }
 
-#[tokio::test]
 async fn test_truncate_in_the_same_block() {
     let (_, cache) = prepare_empty_storage().await;
 
@@ -332,7 +412,6 @@ async fn test_truncate_in_the_same_block() {
     assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
 }
 
-#[tokio::test]
 async fn test_write_out_of_range() {
     let (_, cache) = prepare_empty_storage().await;
 
@@ -365,7 +444,6 @@ async fn prepare_empty_storage_with_write_back() -> (Arc<MemoryStorage>, Arc<Mem
     (backend, cache)
 }
 
-#[tokio::test]
 async fn test_store_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
@@ -389,7 +467,6 @@ async fn test_store_write_back() {
     assert!(backend.contains(0, 1));
 }
 
-#[tokio::test]
 async fn test_evict_dirty_block_with_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
@@ -413,7 +490,6 @@ async fn test_evict_dirty_block_with_write_back() {
     assert!(backend.contains(0, 0));
 }
 
-#[tokio::test]
 async fn test_truncate_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
@@ -422,22 +498,29 @@ async fn test_truncate_write_back() {
         block.set_dirty(true);
         cache.store(0, block_id, block).await.unwrap();
         // Wait for the write back task
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // tokio::time::sleep(Duration::from_secs(1)).await;
     }
+
+    // println!("1. cache: {:#?}", cache);
+    // println!("1. backend: {:#?}", backend);
 
     cache.flush(0).await.unwrap();
 
     cache.truncate(0, 4, 2, BLOCK_SIZE_IN_BYTES).await.unwrap();
 
+    // println!("2. cache: {:#?}", cache);
+    // println!("2. backend: {:#?}", backend);
+
     assert!(backend.contains(0, 2));
     assert!(backend.contains(0, 3));
 
     cache.flush(0).await.unwrap();
+    // println!("3. cache: {:#?}", cache);
+    // println!("3. backend: {:#?}", backend);
     assert!(!backend.contains(0, 2));
     assert!(!backend.contains(0, 3));
 }
 
-#[tokio::test]
 async fn test_truncate_in_middle_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
@@ -479,7 +562,6 @@ async fn test_truncate_in_middle_write_back() {
     assert!(!backend.contains(0, 7));
 }
 
-#[tokio::test]
 async fn test_truncate_fill_write_back() {
     let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
@@ -501,7 +583,6 @@ async fn test_truncate_fill_write_back() {
     assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
 }
 
-#[tokio::test]
 async fn test_write_back_task() {
     let (_, cache) = prepare_empty_storage().await;
 

@@ -41,7 +41,7 @@ enum TaskHandle {
     Regular(Vec<JoinHandle<()>>),
     /// GC task that runs in the background.
     /// A `GcHandle` is to spawn tasks into GC task.
-    Gc(GcHandle, JoinHandle<GcTask>),
+    Gc(GcHandle, JoinHandle<()>),
 }
 
 impl Default for TaskHandle {
@@ -65,10 +65,13 @@ pub(super) struct Task {
     depends_on: Vec<TaskName>,
     /// The count of predecessors.
     predecessor_count: usize,
+    /// The task runtime
+    runtime: tokio::runtime::Runtime,
 }
 
 impl Task {
     /// Create a task node with `name`.
+    #[allow(clippy::unwrap_used)]
     pub fn new(name: TaskName, status: Arc<AtomicBool>) -> Self {
         Self {
             name,
@@ -77,6 +80,7 @@ impl Task {
             handles: TaskHandle::default(),
             depends_on: vec![],
             predecessor_count: 0,
+            runtime: tokio::runtime::Runtime::new().unwrap(),
         }
     }
 
@@ -100,10 +104,50 @@ impl Task {
         }
 
         let token = self.token();
-        let (tx, rx) = mpsc::channel(DEFAULT_HANDLE_QUEUE_LIMIT);
+        let (tx, mut rx) = mpsc::channel(DEFAULT_HANDLE_QUEUE_LIMIT);
+
+        match rx.try_recv() {
+            Ok(_) => {
+                // panic!("The receiver of GC task is not empty.");
+                println!("The receiver of GC task is not empty.");
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {
+                println!("The receiver of GC task is empty.");
+            }
+            Err(e) => {
+                panic!("The receiver of GC task is not empty, error: {:#?}", e);
+            }
+        }
+        #[allow(unused_variables)]
         let gc_task = GcTask::new(self.name, rx, DEFAULT_TIMEOUT);
 
-        let task_handle = tokio::spawn(gc_task.run(token.clone()));
+        // println!("rx: {:#?}", &rx);
+        #[allow(unused_variables)]
+        let token_clone = self.token();
+        println!("GC task is started, name: {:#?}.", self.name.clone());
+
+        // let barrier = tokio::sync::Barrier::new(2);
+        // let barrier_clone = barrier.();
+        // #[allow(clippy::unwrap_used)]
+        // let rt = tokio::runtime::Runtime::new().unwrap();
+        let current_handle = tokio::runtime::Handle::current();
+        println!("GC task current_handle: {:#?} pointer:{:p}", current_handle, &current_handle);
+
+        // Get global task runtime
+        println!("TASK_MANAGER_RUNTIME: {:#?}", self.runtime);
+
+        // init
+        // run blocking
+        let task_handle = tokio::spawn(
+            async move {
+                println!("GC task is started inner.");
+                gc_task.run(token_clone.clone())
+                    .await;
+
+                println!("GC task is shutdown.");
+            });
+        // let task_handle = tokio::spawn(async move {loop{tokio::time::sleep(std::time::Duration::from_secs(1)).await;println!("Mock GC task is running.");}});
+        println!("GC task is started done, name: {:#?}.", self.name.clone());
         let gc_handle = GcHandle::new(self.name, Arc::clone(&self.status), token, tx);
 
         self.handles = TaskHandle::Gc(gc_handle, task_handle);

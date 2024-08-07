@@ -43,6 +43,7 @@ impl TaskManager {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
+        println!("current is started");
         let mut tasks = HashMap::new();
         let is_shutdown = Arc::default();
         for (prev, next) in EDGES {
@@ -63,6 +64,8 @@ impl TaskManager {
                 .or_insert_with(|| Task::new(gc_task_name, Arc::clone(&is_shutdown)))
                 .convert_to_gc_task();
         }
+
+        println!("current is started is done");
 
         Self {
             tasks: Mutex::new(tasks),

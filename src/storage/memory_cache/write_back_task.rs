@@ -54,12 +54,14 @@ async fn write_back_one_block<P, S>(
     S: Storage + Send + Sync + 'static,
 {
     let result = cache.backend().store(ino, block_id, block).await;
+    println!("before write_back_one_block send: {ino} {block_id}");
     tx.send(result).unwrap_or_else(|res| {
         warn!("The receiver of pending block is closed unexpectedly.");
         if let Err(e) = res {
             error!("Failed to write the block back, where ino={ino}, block_id={block_id}, err={e}");
         }
     });
+    println!("after write_back_one_block send: {ino} {block_id}");
 }
 
 /// The write back task running in the background.
@@ -146,8 +148,31 @@ where
                 .get_mut(&ino)
                 .and_then(|file_level_pending_blocks| file_level_pending_blocks.remove(&block_id))
             {
-                write_back_one_block(Arc::clone(&self.storage), ino, block_id, block.clone(), tx)
-                    .await;
+                let write_back_barrier = Arc::new(tokio::sync::Barrier::new(2));
+                let write_back_barrier_clone = Arc::clone(&write_back_barrier);
+                let storage_clone = Arc::clone(&self.storage);
+                let block_clone = block.clone();
+                let res = self
+                .block_flush_spawn_handle
+                .spawn(|_| async move {
+                    write_back_one_block(
+                        storage_clone,
+                        ino,
+                        block_id,
+                        block_clone,
+                        tx,
+                    ).await;
+                    write_back_barrier_clone.wait().await;
+                })
+                .await;
+                if res.is_err() {
+                    if let Err(e) = self.storage.backend().store(ino, block_id, block).await {
+                        error!("Failed to store block where ino={ino}, block_id={block_id}, err={e}.");
+                    }
+                }
+                write_back_barrier.wait().await;
+                // write_back_one_block(Arc::clone(&self.storage), ino, block_id, block.clone(), tx)
+                //     .await;
             }
         }
     }
@@ -161,20 +186,29 @@ where
         let mut shutdown = self.block_flush_spawn_handle.is_shutdown();
 
         if let Some(file_level_pending_blocks) = file_level_pending_blocks {
+            // Use a waitgroup or channel to wait for this tasks is finished, and make sure these write back task is finished.
+            let file_level_pending_blocks_size = file_level_pending_blocks.len();
+            let write_back_barrier = Arc::new(tokio::sync::Barrier::new(file_level_pending_blocks_size + 1));
+
             for (block_id, (block, tx)) in file_level_pending_blocks {
                 if shutdown {
                     error!("Trying to flush a file after shutdown.");
                 } else {
+                    // write_back_barrier
+                    let storage_clone = Arc::clone(&self.storage);
+                    let write_back_barrier_clone = Arc::clone(&write_back_barrier);
+                    let block_clone = block.clone();
                     let res = self
                         .block_flush_spawn_handle
-                        .spawn(|_| {
+                        .spawn(|_| async move {
                             write_back_one_block(
-                                Arc::clone(&self.storage),
+                                storage_clone,
                                 ino,
                                 block_id,
-                                block.clone(),
+                                block_clone,
                                 tx,
-                            )
+                            ).await;
+                            write_back_barrier_clone.wait().await;
                         })
                         .await;
                     if res.is_err() {
@@ -185,7 +219,12 @@ where
                     }
                 }
             }
+
+            // Wait for write back task is finished
+            write_back_barrier.wait().await;
         }
+
+
     }
 
     /// Flush all files, write blocks of them to backend immediately.

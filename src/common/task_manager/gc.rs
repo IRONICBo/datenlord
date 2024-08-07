@@ -10,7 +10,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, instrument};
 
 use super::{SpawnError, TaskName};
 
@@ -70,11 +70,31 @@ impl GcHandle {
 
         let token = self.token.clone();
         let future = f(token).boxed();
+        println!("before spawn send:");
+        // futures::join!(self.tx.closed());
+        // for _ in 0..100 {
+        //     if self.tx.is_closed() {
+        //         println!("self.rx is closed:");
+        //         tokio::time::sleep(Duration::from_secs(1)).await;
+        //     }
+        // }
+        // wait for rx is ready
+        // println!("gc handle sender: {}", self.tx.closed().await);
+        match self.tx.try_send(future) {
+            Ok(_) => {
+                println!("send success");
+            },
+            Err(e) => {
+                eprintln!("send error: {:#?}", e);
+                // return Err(SpawnError(self.name));
+            }
+        }
+        // self.tx
+        //     .send(future)
+        //     .await
+        //     .map_err(|_e| SpawnError(self.name))?;
+        println!("after spawn send:");
 
-        self.tx
-            .send(future)
-            .await
-            .map_err(|_e| SpawnError(self.name))?;
         Ok(())
     }
 }
@@ -109,24 +129,36 @@ impl GcTask {
 
     /// Run the GC task, consume the task itself.
     #[allow(clippy::pattern_type_mismatch)] // for `tokio::select!`
+    #[allow(unused_mut)]
+    #[allow(unused_variables)]
+    #[instrument]
     pub async fn run(mut self, token: CancellationToken) -> Self {
+        println!("before select111:");
         loop {
+            println!("before select, recv status: {}", self.rx.is_closed());
+            println!("before select, recv status: {}", self.rx.len());
+            // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             select! {
                 res = self.rx.recv() => {
+                    println!("self.rx.recv()");
                     if let Some(future) = res {
                         self.tasks.spawn(future);
                     } else {
                         info!("All senders of handles are closed, so GC task `{:?}` is exiting.", self.name);
+                        println!("All senders of handles are closed, so GC task `{:?}` is exiting.", self.name);
+                        error!("Sub task in `{:?}` failed:", self.name);
                         break;
                     }
                 },
                 Some(res) = self.tasks.join_next() => {
                     if let Err(e) = res {
                         error!("Sub task in `{:?}` failed: {}", self.name, e);
+                        println!("Sub task in `{:?}` failed: {}", self.name, e);
                     }
                 },
                 () = token.cancelled() => {
                     info!("Shutdown signal received, so GC task `{:?}` is exiting.", self.name);
+                    println!("Shutdown signal received, so GC task `{:?}` is exiting.", self.name);
                     break;
                 }
             }
@@ -156,6 +188,7 @@ impl GcTask {
                         }
                     } else {
                         info!("GC task `{:?}` exits.", self.name);
+                        println!("GC task `{:?}` exits, will return here.", self.name);
                         break;
                     }
                 }
