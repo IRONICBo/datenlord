@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use datenlord::config::SoftLimit;
+use once_cell::sync::Lazy;
+use rstest::rstest;
+use tokio::runtime::Runtime;
 
 use super::{MemoryCache, MemoryCacheBuilder};
 use crate::storage::mock::MemoryStorage;
@@ -16,6 +19,23 @@ const BLOCK_CONTENT: &[u8; BLOCK_SIZE_IN_BYTES] = b"foo bar ";
 const CACHE_CAPACITY_IN_BLOCKS: usize = 4;
 
 type MemoryCacheType = MemoryCache<LruPolicy<BlockCoordinate>, Arc<MemoryStorage>>;
+
+// Shared runtime for all tests
+#[allow(clippy::unwrap_used)]
+static RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
+    Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap(),
+    )
+});
+
+// Run the test with the shared runtime
+fn shared_runtime_test<F: std::future::Future>(f: F) -> F::Output {
+    RUNTIME.handle().block_on(f)
+}
 
 async fn prepare_empty_storage() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) {
     let policy = LruPolicy::<BlockCoordinate>::new(CACHE_CAPACITY_IN_BLOCKS);
@@ -30,90 +50,100 @@ async fn prepare_empty_storage() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) {
     (backend, cache)
 }
 
-#[tokio::test]
-async fn test_write_whole_block() {
-    let ino = 0;
-    let block_id = 0;
+#[rstest]
+fn test_write_whole_block() {
+    shared_runtime_test(async {
+        let ino = 0;
+        let block_id = 0;
 
-    let (backend, cache) = prepare_empty_storage().await;
+        let (backend, cache) = prepare_empty_storage().await;
 
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(ino, block_id, block).await.unwrap();
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(ino, block_id, block).await.unwrap();
 
-    let loaded_from_cache = cache.load(ino, block_id).await.unwrap().unwrap();
-    assert_eq!(loaded_from_cache.as_slice(), BLOCK_CONTENT);
+        let loaded_from_cache = cache.load(ino, block_id).await.unwrap().unwrap();
+        assert_eq!(loaded_from_cache.as_slice(), BLOCK_CONTENT);
 
-    // test write through
-    let loaded_from_backend = backend.load(ino, block_id).await.unwrap().unwrap();
-    assert_eq!(loaded_from_backend.as_slice(), loaded_from_cache.as_slice());
+        // test write through
+        let loaded_from_backend = backend.load(ino, block_id).await.unwrap().unwrap();
+        assert_eq!(loaded_from_backend.as_slice(), loaded_from_cache.as_slice());
+    });
 }
 
-#[tokio::test]
-async fn test_overwrite() {
-    let ino = 0;
-    let block_id = 0;
+#[rstest]
+fn test_overwrite() {
+    shared_runtime_test(async {
+        let ino = 0;
+        let block_id = 0;
 
-    let (_, cache) = prepare_empty_storage().await;
+        let (_, cache) = prepare_empty_storage().await;
 
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(ino, block_id, block).await.unwrap();
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(ino, block_id, block).await.unwrap();
 
-    let block = Block::from_slice_with_range(BLOCK_SIZE_IN_BYTES, 4, 7, b"foo ");
-    cache.store(ino, block_id, block).await.unwrap();
-    let loaded = cache.load(ino, block_id).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), b"foo foo ");
+        let block = Block::from_slice_with_range(BLOCK_SIZE_IN_BYTES, 4, 7, b"foo ");
+        cache.store(ino, block_id, block).await.unwrap();
+        let loaded = cache.load(ino, block_id).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), b"foo foo ");
 
-    let block = Block::from_slice_with_range(BLOCK_SIZE_IN_BYTES, 0, 4, b"bar xxx ");
-    cache.store(ino, block_id, block).await.unwrap();
-    let loaded = cache.load(ino, block_id).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), b"bar foo ");
+        let block = Block::from_slice_with_range(BLOCK_SIZE_IN_BYTES, 0, 4, b"bar xxx ");
+        cache.store(ino, block_id, block).await.unwrap();
+        let loaded = cache.load(ino, block_id).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), b"bar foo ");
+    });
 }
 
-#[tokio::test]
-async fn test_load_inexist_block() {
-    let ino = 0;
-    let block_id = 0;
+#[rstest]
+fn test_load_inexist_block() {
+    shared_runtime_test(async {
+        let ino = 0;
+        let block_id = 0;
 
-    let (_, cache) = prepare_empty_storage().await;
+        let (_, cache) = prepare_empty_storage().await;
 
-    let block = cache.load(ino, 1).await.unwrap();
-    assert!(block.is_none());
+        let block = cache.load(ino, 1).await.unwrap();
+        assert!(block.is_none());
 
-    let block = cache.load(1, block_id).await.unwrap();
-    assert!(block.is_none());
+        let block = cache.load(1, block_id).await.unwrap();
+        assert!(block.is_none());
+    });
 }
 
-#[tokio::test]
-async fn test_append() {
-    let ino = 0;
+#[rstest]
+fn test_append() {
+    shared_runtime_test(async {
+        let ino = 0;
 
-    let (_, cache) = prepare_empty_storage().await;
+        let (_, cache) = prepare_empty_storage().await;
 
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(ino, 0, block).await.unwrap();
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(ino, 0, block).await.unwrap();
 
-    let block = Block::from_slice_with_range(BLOCK_SIZE_IN_BYTES, 0, 4, b"xxx foo ");
-    cache.store(ino, 1, block).await.unwrap();
+        let block = Block::from_slice_with_range(BLOCK_SIZE_IN_BYTES, 0, 4, b"xxx foo ");
+        cache.store(ino, 1, block).await.unwrap();
 
-    let loaded = cache.load(ino, 1).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), b"xxx \0\0\0\0");
+        let loaded = cache.load(ino, 1).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), b"xxx \0\0\0\0");
+    });
 }
 
-#[tokio::test]
-async fn test_remove() {
-    let ino = 0;
-    let block_id = 0;
+#[rstest]
+fn test_remove() {
+    shared_runtime_test(async {
+        let ino = 0;
+        let block_id = 0;
 
-    let (backend, cache) = prepare_empty_storage().await;
+        let (backend, cache) = prepare_empty_storage().await;
 
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(ino, block_id, block).await.unwrap();
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(ino, block_id, block).await.unwrap();
 
-    cache.remove(ino).await.unwrap();
-    assert!(!backend.contains(ino, block_id));
+        cache.remove(ino).await.unwrap();
+        assert!(!backend.contains(ino, block_id));
 
-    let loaded = cache.load(ino, block_id).await.unwrap();
-    assert!(loaded.is_none());
+        let loaded = cache.load(ino, block_id).await.unwrap();
+        assert!(loaded.is_none());
+    });
 }
 
 /// Prepare a backend and cache for test eviction.
@@ -152,203 +182,225 @@ async fn prepare_data_for_evict() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) 
     (backend, cache)
 }
 
-#[tokio::test]
-async fn test_evict() {
-    let (backend, cache) = prepare_data_for_evict().await;
+#[rstest]
+fn test_evict() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_data_for_evict().await;
 
-    // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
-    // Insert a block, and (0, 0) will be evicted
-    assert!(!backend.contains(0, 0));
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(1, 0, block).await.unwrap();
-    let loaded = backend.load(0, 0).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+        // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
+        // Insert a block, and (0, 0) will be evicted
+        assert!(!backend.contains(0, 0));
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(1, 0, block).await.unwrap();
+        let loaded = backend.load(0, 0).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+    });
 }
 
-#[tokio::test]
-async fn test_touch_by_load() {
-    let (backend, cache) = prepare_data_for_evict().await;
+#[rstest]
+fn test_touch_by_load() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_data_for_evict().await;
 
-    // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
-    // Touch (0, 0) by loading
-    let _: Option<Block> = cache.load(0, 0).await.unwrap();
+        // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
+        // Touch (0, 0) by loading
+        let _: Option<Block> = cache.load(0, 0).await.unwrap();
 
-    // LRU in cache: (0, 1) -> (0, 2) -> (0, 3) -> (0, 0)
-    // Insert a block, and (0, 1) will be evicted
-    assert!(!backend.contains(0, 1));
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(1, 0, block).await.unwrap();
-    let loaded = backend.load(0, 1).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+        // LRU in cache: (0, 1) -> (0, 2) -> (0, 3) -> (0, 0)
+        // Insert a block, and (0, 1) will be evicted
+        assert!(!backend.contains(0, 1));
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(1, 0, block).await.unwrap();
+        let loaded = backend.load(0, 1).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+    });
 }
 
-#[tokio::test]
-async fn test_touch_by_store() {
-    let (backend, cache) = prepare_data_for_evict().await;
+#[rstest]
+fn test_touch_by_store() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_data_for_evict().await;
 
-    // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
-    // Touch (0, 0) by storing
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(0, 0, block).await.unwrap();
+        // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
+        // Touch (0, 0) by storing
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(0, 0, block).await.unwrap();
 
-    // LRU in cache: (0, 1) -> (0, 2) -> (0, 3) -> (0, 0)
-    // Insert a block, and (0, 1) will be evicted
-    assert!(!backend.contains(0, 1));
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(1, 0, block).await.unwrap();
-    let loaded = backend.load(0, 1).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+        // LRU in cache: (0, 1) -> (0, 2) -> (0, 3) -> (0, 0)
+        // Insert a block, and (0, 1) will be evicted
+        assert!(!backend.contains(0, 1));
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(1, 0, block).await.unwrap();
+        let loaded = backend.load(0, 1).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+    });
 }
 
-#[tokio::test]
-async fn test_evict_dirty_block() {
-    let (backend, cache) = prepare_empty_storage().await;
+#[rstest]
+fn test_evict_dirty_block() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_empty_storage().await;
 
-    // Fill the cache
-    for block_id in 0..CACHE_CAPACITY_IN_BLOCKS {
-        let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-        block.set_dirty(true); // This will be done by `StorageManager` in productive env
-        cache.store(0, block_id, block).await.unwrap();
-    }
+        // Fill the cache
+        for block_id in 0..CACHE_CAPACITY_IN_BLOCKS {
+            let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+            block.set_dirty(true); // This will be done by `StorageManager` in productive env
+            cache.store(0, block_id, block).await.unwrap();
+        }
 
-    // Clear the backend
-    backend.remove(0).await.unwrap();
+        // Clear the backend
+        backend.remove(0).await.unwrap();
 
-    // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
-    // All of them are dirty
-    // Insert a block, and (0, 0) will be evicted.
-    // Because it's dirty, it will be dropped directly
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(1, 0, block).await.unwrap();
-    assert!(!backend.contains(0, 0));
+        // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
+        // All of them are dirty
+        // Insert a block, and (0, 0) will be evicted.
+        // Because it's dirty, it will be dropped directly
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(1, 0, block).await.unwrap();
+        assert!(!backend.contains(0, 0));
+    });
 }
 
-#[tokio::test]
-async fn test_flush() {
-    let ino = 0;
-    let block_id = 0;
+#[rstest]
+fn test_flush() {
+    shared_runtime_test(async {
+        let ino = 0;
+        let block_id = 0;
 
-    let (backend, cache) = prepare_empty_storage().await;
+        let (backend, cache) = prepare_empty_storage().await;
 
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(ino, block_id, block).await.unwrap();
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(ino, block_id, block).await.unwrap();
 
-    cache.flush(ino).await.unwrap();
-    assert!(backend.flushed(ino));
+        cache.flush(ino).await.unwrap();
+        assert!(backend.flushed(ino));
 
-    cache.flush_all().await.unwrap();
-    assert!(backend.flushed(ino));
+        cache.flush_all().await.unwrap();
+        assert!(backend.flushed(ino));
+    });
 }
 
-#[tokio::test]
-async fn test_load_from_backend() {
-    let ino = 0;
-    let block_id = 0;
+#[rstest]
+fn test_load_from_backend() {
+    shared_runtime_test(async {
+        let ino = 0;
+        let block_id = 0;
 
-    let (_, cache) = prepare_empty_storage().await;
+        let (_, cache) = prepare_empty_storage().await;
 
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(ino, block_id, block).await.unwrap();
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(ino, block_id, block).await.unwrap();
 
-    cache.invalidate(ino).await.unwrap();
-    let loaded_from_cache = cache.get_block_from_cache(ino, block_id).await;
-    assert!(loaded_from_cache.is_none());
+        cache.invalidate(ino).await.unwrap();
+        let loaded_from_cache = cache.get_block_from_cache(ino, block_id).await;
+        assert!(loaded_from_cache.is_none());
 
-    let loaded = cache.load(ino, block_id).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+        let loaded = cache.load(ino, block_id).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+    });
 }
 
-#[tokio::test]
-async fn test_write_missing_block_in_middle() {
-    let (_, cache) = prepare_empty_storage().await;
+#[rstest]
+fn test_write_missing_block_in_middle() {
+    shared_runtime_test(async {
+        let (_, cache) = prepare_empty_storage().await;
 
-    let block = Block::from_slice_with_range(BLOCK_SIZE_IN_BYTES, 4, 7, &BLOCK_CONTENT[4..7]);
-    cache.store(0, 0, block).await.unwrap();
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, b"\0\0\0\0bar\0");
-    let loaded = cache.load(0, 0).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), block.as_slice());
+        let block = Block::from_slice_with_range(BLOCK_SIZE_IN_BYTES, 4, 7, &BLOCK_CONTENT[4..7]);
+        cache.store(0, 0, block).await.unwrap();
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, b"\0\0\0\0bar\0");
+        let loaded = cache.load(0, 0).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), block.as_slice());
+    });
 }
 
-#[tokio::test]
-async fn test_truncate() {
-    let ino = 0;
-    let from_block = 8;
-    let to_block = 4;
+#[rstest]
+fn test_truncate() {
+    shared_runtime_test(async {
+        let ino = 0;
+        let from_block = 8;
+        let to_block = 4;
 
-    let (backend, cache) = prepare_empty_storage().await;
+        let (backend, cache) = prepare_empty_storage().await;
 
-    for block_id in 0..from_block {
+        for block_id in 0..from_block {
+            cache
+                .store(ino, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+                .await
+                .unwrap();
+        }
+
         cache
-            .store(ino, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+            .truncate(ino, from_block, to_block, BLOCK_SIZE_IN_BYTES)
             .await
             .unwrap();
-    }
-
-    cache
-        .truncate(ino, from_block, to_block, BLOCK_SIZE_IN_BYTES)
-        .await
-        .unwrap();
-    for block_id in to_block..from_block {
-        assert!(!backend.contains(0, block_id));
-        let block = cache.get_block_from_cache(ino, block_id).await;
-        assert!(block.is_none());
-    }
+        for block_id in to_block..from_block {
+            assert!(!backend.contains(0, block_id));
+            let block = cache.get_block_from_cache(ino, block_id).await;
+            assert!(block.is_none());
+        }
+    });
 }
 
-#[tokio::test]
-async fn test_truncate_may_fill() {
-    let ino = 0;
-    let from_block = 8;
-    let to_block = 4;
+#[rstest]
+fn test_truncate_may_fill() {
+    shared_runtime_test(async {
+        let ino = 0;
+        let from_block = 8;
+        let to_block = 4;
 
-    let (_, cache) = prepare_empty_storage().await;
+        let (_, cache) = prepare_empty_storage().await;
 
-    for block_id in 0..from_block {
-        cache
-            .store(0, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
-            .await
-            .unwrap();
-    }
+        for block_id in 0..from_block {
+            cache
+                .store(0, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+                .await
+                .unwrap();
+        }
 
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
 
-    cache.store(ino, 3, block).await.unwrap();
-    cache.truncate(ino, from_block, to_block, 4).await.unwrap();
+        cache.store(ino, 3, block).await.unwrap();
+        cache.truncate(ino, from_block, to_block, 4).await.unwrap();
 
-    let loaded = cache.load(ino, 3).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+        let loaded = cache.load(ino, 3).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+    });
 }
 
-#[tokio::test]
-async fn test_truncate_in_the_same_block() {
-    let (_, cache) = prepare_empty_storage().await;
+#[rstest]
+fn test_truncate_in_the_same_block() {
+    shared_runtime_test(async {
+        let (_, cache) = prepare_empty_storage().await;
 
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
 
-    cache.store(0, 0, block).await.unwrap();
-    cache.truncate(0, 1, 1, 4).await.unwrap();
+        cache.store(0, 0, block).await.unwrap();
+        cache.truncate(0, 1, 1, 4).await.unwrap();
 
-    let loaded = cache.load(0, 0).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+        let loaded = cache.load(0, 0).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+    });
 }
 
-#[tokio::test]
-async fn test_write_out_of_range() {
-    let (_, cache) = prepare_empty_storage().await;
+#[rstest]
+fn test_write_out_of_range() {
+    shared_runtime_test(async {
+        let (_, cache) = prepare_empty_storage().await;
 
-    let block = Block::new_zeroed(16);
-    let res = cache.store(0, 0, block).await.unwrap_err();
+        let block = Block::new_zeroed(16);
+        let res = cache.store(0, 0, block).await.unwrap_err();
 
-    assert!(
-        matches!(
-            res,
-            StorageError::OutOfRange {
-                maximum: 8,
-                found: 16
-            }
-        ),
-        "Mismatched: res={res:?}"
-    );
+        assert!(
+            matches!(
+                res,
+                StorageError::OutOfRange {
+                    maximum: 8,
+                    found: 16
+                }
+            ),
+            "Mismatched: res={res:?}"
+        );
+    });
 }
 
 async fn prepare_empty_storage_with_write_back() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) {
@@ -365,146 +417,158 @@ async fn prepare_empty_storage_with_write_back() -> (Arc<MemoryStorage>, Arc<Mem
     (backend, cache)
 }
 
-#[tokio::test]
-async fn test_store_write_back() {
-    let (backend, cache) = prepare_empty_storage_with_write_back().await;
+#[rstest]
+fn test_store_write_back() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
-    let mut block = Block::new_zeroed(BLOCK_SIZE_IN_BYTES);
-    block.set_dirty(true);
-    cache.store(0, 0, block).await.unwrap();
-    let loaded = cache.load(0, 0).await.unwrap();
-    assert!(loaded.is_some());
+        let mut block = Block::new_zeroed(BLOCK_SIZE_IN_BYTES);
+        block.set_dirty(true);
+        cache.store(0, 0, block).await.unwrap();
+        let loaded = cache.load(0, 0).await.unwrap();
+        assert!(loaded.is_some());
 
-    cache.flush(0).await.unwrap();
-    assert!(backend.contains(0, 0));
+        cache.flush(0).await.unwrap();
+        assert!(backend.contains(0, 0));
 
-    let mut block = Block::new_zeroed(BLOCK_SIZE_IN_BYTES);
-    block.set_dirty(true);
-    cache.store(0, 1, block).await.unwrap();
-    cache.flush_all().await.unwrap();
-    assert!(backend.contains(0, 1));
+        let mut block = Block::new_zeroed(BLOCK_SIZE_IN_BYTES);
+        block.set_dirty(true);
+        cache.store(0, 1, block).await.unwrap();
+        cache.flush_all().await.unwrap();
+        assert!(backend.contains(0, 1));
+    });
 }
 
-#[tokio::test]
-async fn test_evict_dirty_block_with_write_back() {
-    let (backend, cache) = prepare_empty_storage_with_write_back().await;
+#[rstest]
+fn test_evict_dirty_block_with_write_back() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
-    // Fill the cache
-    for block_id in 0..CACHE_CAPACITY_IN_BLOCKS {
-        let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-        block.set_dirty(true); // This will be done by `StorageManager` in productive env
-        cache.store(0, block_id, block).await.unwrap();
-    }
+        // Fill the cache
+        for block_id in 0..CACHE_CAPACITY_IN_BLOCKS {
+            let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+            block.set_dirty(true); // This will be done by `StorageManager` in productive env
+            cache.store(0, block_id, block).await.unwrap();
+        }
 
-    // Clear the backend
-    backend.remove(0).await.unwrap();
+        // Clear the backend
+        backend.remove(0).await.unwrap();
 
-    // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
-    // All of them are dirty
-    // Insert a block, and (0, 0) will be evicted.
-    // Because it's dirty, it will be dropped directly
-    let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    cache.store(1, 0, block).await.unwrap();
-    assert!(backend.contains(0, 0));
+        // LRU in cache: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3)
+        // All of them are dirty
+        // Insert a block, and (0, 0) will be evicted.
+        // Because it's dirty, it will be dropped directly
+        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+        cache.store(1, 0, block).await.unwrap();
+        assert!(backend.contains(0, 0));
+    });
 }
 
-#[tokio::test]
-async fn test_truncate_write_back() {
-    let (backend, cache) = prepare_empty_storage_with_write_back().await;
+#[rstest]
+fn test_truncate_write_back() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
-    for block_id in 0..4 {
+        for block_id in 0..4 {
+            let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+            block.set_dirty(true);
+            cache.store(0, block_id, block).await.unwrap();
+        }
+
+        cache.flush(0).await.unwrap();
+
+        cache.truncate(0, 4, 2, BLOCK_SIZE_IN_BYTES).await.unwrap();
+
+        assert!(backend.contains(0, 2));
+        assert!(backend.contains(0, 3));
+
+        cache.flush(0).await.unwrap();
+        assert!(!backend.contains(0, 2));
+        assert!(!backend.contains(0, 3));
+    });
+}
+
+#[rstest]
+fn test_truncate_in_middle_write_back() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_empty_storage_with_write_back().await;
+
+        for block_id in 0..8 {
+            let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+            block.set_dirty(true);
+            cache.store(0, block_id, block).await.unwrap();
+        }
+
+        cache.flush(0).await.unwrap();
+
+        cache.truncate(0, 8, 2, BLOCK_SIZE_IN_BYTES).await.unwrap();
+
         let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
         block.set_dirty(true);
-        cache.store(0, block_id, block).await.unwrap();
-    }
+        cache.store(0, 4, block).await.unwrap();
 
-    cache.flush(0).await.unwrap();
-
-    cache.truncate(0, 4, 2, BLOCK_SIZE_IN_BYTES).await.unwrap();
-
-    assert!(backend.contains(0, 2));
-    assert!(backend.contains(0, 3));
-
-    cache.flush(0).await.unwrap();
-    assert!(!backend.contains(0, 2));
-    assert!(!backend.contains(0, 3));
-}
-
-#[tokio::test]
-async fn test_truncate_in_middle_write_back() {
-    let (backend, cache) = prepare_empty_storage_with_write_back().await;
-
-    for block_id in 0..8 {
         let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
         block.set_dirty(true);
-        cache.store(0, block_id, block).await.unwrap();
-    }
+        cache.store(0, 6, block).await.unwrap();
 
-    cache.flush(0).await.unwrap();
+        let loaded = cache.load(0, 4).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+        let loaded = cache.load(0, 6).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 
-    cache.truncate(0, 8, 2, BLOCK_SIZE_IN_BYTES).await.unwrap();
-
-    let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    block.set_dirty(true);
-    cache.store(0, 4, block).await.unwrap();
-
-    let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-    block.set_dirty(true);
-    cache.store(0, 6, block).await.unwrap();
-
-    let loaded = cache.load(0, 4).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
-    let loaded = cache.load(0, 6).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
-
-    cache.flush(0).await.unwrap();
-    assert!(!backend.contains(0, 2));
-    assert!(!backend.contains(0, 3));
-    assert!(backend.contains(0, 4));
-    assert!(!backend.contains(0, 5));
-    assert!(backend.contains(0, 6));
-    assert!(!backend.contains(0, 7));
+        cache.flush(0).await.unwrap();
+        assert!(!backend.contains(0, 2));
+        assert!(!backend.contains(0, 3));
+        assert!(backend.contains(0, 4));
+        assert!(!backend.contains(0, 5));
+        assert!(backend.contains(0, 6));
+        assert!(!backend.contains(0, 7));
+    });
 }
 
-#[tokio::test]
-async fn test_truncate_fill_write_back() {
-    let (backend, cache) = prepare_empty_storage_with_write_back().await;
+#[rstest]
+fn test_truncate_fill_write_back() {
+    shared_runtime_test(async {
+        let (backend, cache) = prepare_empty_storage_with_write_back().await;
 
-    for block_id in 0..8 {
-        let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-        block.set_dirty(true);
-        cache.store(0, block_id, block).await.unwrap();
-    }
-    cache.flush(0).await.unwrap();
+        for block_id in 0..8 {
+            let mut block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+            block.set_dirty(true);
+            cache.store(0, block_id, block).await.unwrap();
+        }
+        cache.flush(0).await.unwrap();
 
-    cache.truncate(0, 8, 2, 4).await.unwrap();
+        cache.truncate(0, 8, 2, 4).await.unwrap();
 
-    let loaded = backend.load(0, 1).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
+        let loaded = backend.load(0, 1).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), BLOCK_CONTENT);
 
-    cache.flush(0).await.unwrap();
+        cache.flush(0).await.unwrap();
 
-    let loaded = backend.load(0, 1).await.unwrap().unwrap();
-    assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+        let loaded = backend.load(0, 1).await.unwrap().unwrap();
+        assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+    });
 }
 
-#[tokio::test]
-async fn test_write_back_task() {
-    let (_, cache) = prepare_empty_storage().await;
+#[rstest]
+fn test_write_back_task() {
+    shared_runtime_test(async {
+        let (_, cache) = prepare_empty_storage().await;
 
-    for block_id in 0..CACHE_CAPACITY_IN_BLOCKS {
-        cache
-            .store(0, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
-            .await
-            .unwrap();
-    }
+        for block_id in 0..CACHE_CAPACITY_IN_BLOCKS {
+            cache
+                .store(0, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+                .await
+                .unwrap();
+        }
 
-    // The first tow blocks should be evicted.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+        // The first tow blocks should be evicted.
+        tokio::time::sleep(Duration::from_millis(250)).await;
 
-    {
-        let file_cache = cache.get_file_cache(0).unwrap().read_owned().await;
-        assert!(!file_cache.contains_key(&0));
-        assert!(!file_cache.contains_key(&1));
-    }
+        {
+            let file_cache = cache.get_file_cache(0).unwrap().read_owned().await;
+            assert!(!file_cache.contains_key(&0));
+            assert!(!file_cache.contains_key(&1));
+        }
+    });
 }
