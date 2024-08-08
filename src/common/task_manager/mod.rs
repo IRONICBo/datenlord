@@ -13,3 +13,6 @@ mod tests;
 pub use gc::GcHandle;
 pub use manager::{wait_for_shutdown, SpawnError, TaskManager, TASK_MANAGER};
 pub use task::TaskName;
+
+#[cfg(test)]
+pub use tests::{shared_runtime_handle, shared_runtime_test};

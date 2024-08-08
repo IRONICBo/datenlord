@@ -158,182 +158,205 @@ impl Storage for MemoryStorage {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use clippy_utilities::OverflowArithmetic;
+    use rstest::rstest;
     use tokio::time::Instant;
 
     use super::{Block, Duration, MemoryStorage, Storage};
-    use crate::storage::StorageError;
+    use crate::{common::task_manager::shared_runtime_test, storage::StorageError};
 
     const BLOCK_SIZE_IN_BYTES: usize = 8;
     const BLOCK_CONTENT: &[u8; BLOCK_SIZE_IN_BYTES] = b"foo bar ";
 
-    #[tokio::test]
-    async fn test_read_write() {
-        let ino = 0;
-        let block_id = 0;
-        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+    #[rstest]
+    fn test_read_write() {
+        shared_runtime_test(async {
+            let ino = 0;
+            let block_id = 0;
+            let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
 
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
-        storage.store(ino, block_id, block).await.unwrap();
-        assert!(storage.contains(ino, block_id));
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
+            storage.store(ino, block_id, block).await.unwrap();
+            assert!(storage.contains(ino, block_id));
 
-        let block = storage.load(ino, block_id).await.unwrap().unwrap();
-        assert_eq!(block.as_slice(), BLOCK_CONTENT);
+            let block = storage.load(ino, block_id).await.unwrap().unwrap();
+            assert_eq!(block.as_slice(), BLOCK_CONTENT);
 
-        assert!(!storage.contains(ino, 1));
-        let block = storage.load(ino, 1).await.unwrap();
-        assert!(block.is_none());
+            assert!(!storage.contains(ino, 1));
+            let block = storage.load(ino, 1).await.unwrap();
+            assert!(block.is_none());
 
-        assert!(!storage.contains(1, 1));
-        let block = storage.load(1, 1).await.unwrap();
-        assert!(block.is_none());
+            assert!(!storage.contains(1, 1));
+            let block = storage.load(1, 1).await.unwrap();
+            assert!(block.is_none());
 
-        storage.remove(ino).await.unwrap();
-        assert!(!storage.contains(ino, block_id));
-        let block = storage.load(ino, block_id).await.unwrap();
-        assert!(block.is_none());
+            storage.remove(ino).await.unwrap();
+            assert!(!storage.contains(ino, block_id));
+            let block = storage.load(ino, block_id).await.unwrap();
+            assert!(block.is_none());
+        });
     }
 
-    #[tokio::test]
-    async fn test_flush() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
-        storage.flush(0).await.unwrap();
-        assert!(storage.flushed(0));
-        assert!(!storage.flushed(0));
+    #[rstest]
+    fn test_flush() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
+            storage.flush(0).await.unwrap();
+            assert!(storage.flushed(0));
+            assert!(!storage.flushed(0));
 
-        storage
-            .store(0, 0, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
-            .await
-            .unwrap();
-        storage.flush_all().await.unwrap();
-        assert!(storage.flushed(0));
-        assert!(!storage.flushed(0));
-    }
-
-    #[tokio::test]
-    async fn test_invalid() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
-        storage.invalidate(0).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_truncate_whole_blocks() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
-        for block_id in 0..8 {
             storage
-                .store(0, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+                .store(0, 0, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
                 .await
                 .unwrap();
-            assert!(storage.contains(0, block_id));
-        }
-
-        storage
-            .truncate(0, 8, 4, BLOCK_SIZE_IN_BYTES)
-            .await
-            .unwrap();
-        for block_id in 0..4 {
-            assert!(storage.contains(0, block_id));
-        }
-        for block_id in 4..8 {
-            assert!(!storage.contains(0, block_id));
-        }
+            storage.flush_all().await.unwrap();
+            assert!(storage.flushed(0));
+            assert!(!storage.flushed(0));
+        });
     }
 
-    #[tokio::test]
-    async fn test_truncate_may_fill() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
-        for block_id in 0..8 {
+    #[rstest]
+    fn test_invalid() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
+            storage.invalidate(0).await.unwrap();
+        });
+    }
+
+    #[rstest]
+    fn test_truncate_whole_blocks() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
+            for block_id in 0..8 {
+                storage
+                    .store(0, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+                    .await
+                    .unwrap();
+                assert!(storage.contains(0, block_id));
+            }
+
             storage
-                .store(0, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+                .truncate(0, 8, 4, BLOCK_SIZE_IN_BYTES)
                 .await
                 .unwrap();
-            assert!(storage.contains(0, block_id));
-        }
-
-        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
-
-        storage.store(0, 3, block).await.unwrap();
-        storage.truncate(0, 8, 4, 4).await.unwrap();
-
-        let loaded = storage.load(0, 3).await.unwrap().unwrap();
-        assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+            for block_id in 0..4 {
+                assert!(storage.contains(0, block_id));
+            }
+            for block_id in 4..8 {
+                assert!(!storage.contains(0, block_id));
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn test_truncate_in_the_same_block() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
+    #[rstest]
+    fn test_truncate_may_fill() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
+            for block_id in 0..8 {
+                storage
+                    .store(0, block_id, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+                    .await
+                    .unwrap();
+                assert!(storage.contains(0, block_id));
+            }
 
-        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+            let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
 
-        storage.store(0, 0, block).await.unwrap();
-        storage.truncate(0, 1, 1, 4).await.unwrap();
+            storage.store(0, 3, block).await.unwrap();
+            storage.truncate(0, 8, 4, 4).await.unwrap();
 
-        let loaded = storage.load(0, 0).await.unwrap().unwrap();
-        assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+            let loaded = storage.load(0, 3).await.unwrap().unwrap();
+            assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+        });
     }
 
-    #[tokio::test]
-    async fn test_write_latency() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
+    #[rstest]
+    fn test_truncate_in_the_same_block() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(0));
 
-        let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
+            let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
 
-        let now = Instant::now();
-        storage.store(0, 0, block).await.unwrap();
-        let duration = now.elapsed();
+            storage.store(0, 0, block).await.unwrap();
+            storage.truncate(0, 1, 1, 4).await.unwrap();
 
-        assert!(duration.as_millis() >= 50);
+            let loaded = storage.load(0, 0).await.unwrap().unwrap();
+            assert_eq!(loaded.as_slice(), b"foo \0\0\0\0");
+        });
     }
 
-    #[tokio::test]
-    async fn test_read_latency() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
+    #[rstest]
+    fn test_write_latency() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
 
-        let now = Instant::now();
-        let _loaded = storage.load(0, 0).await.unwrap();
-        let duration = now.elapsed();
+            let block = Block::from_slice(BLOCK_SIZE_IN_BYTES, BLOCK_CONTENT);
 
-        assert!(duration.as_millis() >= 50);
+            let now = Instant::now();
+            storage.store(0, 0, block).await.unwrap();
+            let duration = now.elapsed();
+
+            assert!(duration.as_millis() >= 50);
+        });
     }
 
-    #[tokio::test]
-    async fn test_remove_latency() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
+    #[rstest]
+    fn test_read_latency() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
 
-        let now = Instant::now();
-        storage.remove(0).await.unwrap();
-        let duration = now.elapsed();
+            let now = Instant::now();
+            let _loaded = storage.load(0, 0).await.unwrap();
+            let duration = now.elapsed();
 
-        assert!(duration.as_millis() >= 50);
+            assert!(duration.as_millis() >= 50);
+        });
     }
 
-    #[tokio::test]
-    async fn test_truncate_latency() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
+    #[rstest]
+    fn test_remove_latency() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
 
-        let now = Instant::now();
-        storage.truncate(0, 1, 1, 4).await.unwrap();
-        let duration = now.elapsed();
+            let now = Instant::now();
+            storage.remove(0).await.unwrap();
+            let duration = now.elapsed();
 
-        assert!(duration.as_millis() >= 50);
+            assert!(duration.as_millis() >= 50);
+        });
     }
 
-    #[tokio::test]
-    async fn test_out_of_range() {
-        let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
+    #[rstest]
+    fn test_truncate_latency() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
 
-        storage
-            .store(0, 0, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
-            .await
-            .unwrap();
-        let err = storage
-            .store(0, 0, Block::new_zeroed(BLOCK_SIZE_IN_BYTES.overflow_mul(2)))
-            .await
-            .unwrap_err();
+            let now = Instant::now();
+            storage.truncate(0, 1, 1, 4).await.unwrap();
+            let duration = now.elapsed();
 
-        assert!(matches!(
-            err,
-            StorageError::OutOfRange { maximum, found }
-            if maximum == BLOCK_SIZE_IN_BYTES && found == BLOCK_SIZE_IN_BYTES.overflow_mul(2)
-        ));
+            assert!(duration.as_millis() >= 50);
+        });
+    }
+
+    #[rstest]
+    fn test_out_of_range() {
+        shared_runtime_test(async {
+            let storage = MemoryStorage::new(BLOCK_SIZE_IN_BYTES, Duration::from_millis(50));
+
+            storage
+                .store(0, 0, Block::new_zeroed(BLOCK_SIZE_IN_BYTES))
+                .await
+                .unwrap();
+            let err = storage
+                .store(0, 0, Block::new_zeroed(BLOCK_SIZE_IN_BYTES.overflow_mul(2)))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                StorageError::OutOfRange { maximum, found }
+                if maximum == BLOCK_SIZE_IN_BYTES && found == BLOCK_SIZE_IN_BYTES.overflow_mul(2)
+            ));
+        });
     }
 }

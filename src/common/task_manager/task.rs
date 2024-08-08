@@ -9,6 +9,9 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use crate::common::task_manager::tests::shared_runtime_handle;
+
 use super::gc::{GcHandle, GcTask, DEFAULT_HANDLE_QUEUE_LIMIT, DEFAULT_TIMEOUT};
 use super::SpawnError;
 
@@ -103,9 +106,21 @@ impl Task {
         let (tx, rx) = mpsc::channel(DEFAULT_HANDLE_QUEUE_LIMIT);
         let gc_task = GcTask::new(self.name, rx, DEFAULT_TIMEOUT);
 
-        let task_handle = tokio::spawn(gc_task.run(token.clone()));
-        let gc_handle = GcHandle::new(self.name, Arc::clone(&self.status), token, tx);
+        let task_handle = match () {
+            #[cfg(test)]
+            () => {
+                // Get shared singleton tokio runtime.
+                let runtime = shared_runtime_handle();
+                runtime.spawn(gc_task.run(token.clone()))
+            }
+            #[cfg(not(test))]
+            () => {
+                // Use main runtime
+                tokio::spawn(gc_task.run(token.clone()))
+            }
+        };
 
+        let gc_handle = GcHandle::new(self.name, Arc::clone(&self.status), token, tx);
         self.handles = TaskHandle::Gc(gc_handle, task_handle);
     }
 

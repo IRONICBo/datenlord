@@ -6,8 +6,10 @@ use std::time::{Duration, SystemTime};
 
 use clippy_utilities::OverflowArithmetic;
 use datenlord::config::SoftLimit;
+use rstest::rstest;
 
 use super::{BLOCK_CONTENT, BLOCK_SIZE_IN_BYTES};
+use crate::common::task_manager::shared_runtime_test;
 use crate::storage::policy::LruPolicy;
 use crate::storage::{BlockCoordinate, MemoryCacheBuilder, MemoryStorage, Storage, StorageManager};
 
@@ -37,113 +39,119 @@ async fn create_storage_with_latency(write_through: bool) -> Arc<StorageManager<
     Arc::new(StorageManager::new(cache, BLOCK_SIZE_IN_BYTES))
 }
 
-#[tokio::test]
-async fn test_write_through_latency() {
-    let storage = create_storage_with_latency(true).await;
+#[rstest]
+fn test_write_through_latency() {
+    shared_runtime_test(async {
+        let storage = create_storage_with_latency(true).await;
 
-    let (latency, mtime) = elapsed!(storage
-        .store(0, 0, BLOCK_CONTENT, SystemTime::now())
-        .await
-        .unwrap());
-    assert!(latency.as_millis() >= 100, "latency = {latency:?}");
-
-    let (latency, _) = elapsed!(storage
-        .load(0, 0, BLOCK_SIZE_IN_BYTES, mtime)
-        .await
-        .unwrap());
-    assert!(latency.as_millis() < 2, "latency = {latency:?}");
-
-    // Update
-    let (latency, _) = elapsed!(storage
-        .store(0, 0, &BLOCK_CONTENT[..4], mtime)
-        .await
-        .unwrap());
-    assert!(latency.as_millis() >= 100, "latency = {latency:?}");
-
-    // Invalidate the cache, and update
-    let (latency, mtime) = elapsed!(storage
-        .store(0, 0, &BLOCK_CONTENT[..4], SystemTime::now())
-        .await
-        .unwrap());
-    assert!(latency.as_millis() >= 200, "latency = {latency:?}");
-
-    let (latency, _) = elapsed!(storage
-        .truncate(0, BLOCK_SIZE_IN_BYTES, 4, mtime)
-        .await
-        .unwrap());
-    assert!(latency.as_millis() >= 100, "latency = {latency:?}");
-
-    let (latency, _) = elapsed!(storage.truncate(0, 4, 1, SystemTime::now()).await.unwrap());
-    assert!(latency.as_millis() >= 100, "latency = {latency:?}");
-
-    // Invalid the cache, and load
-    let (latency, _) = elapsed!(storage
-        .load(0, 0, BLOCK_SIZE_IN_BYTES, SystemTime::now())
-        .await
-        .unwrap());
-    assert!(latency.as_millis() >= 100, "latency = {latency:?}");
-}
-
-#[tokio::test]
-async fn test_write_back_latency() {
-    let storage = create_storage_with_latency(false).await;
-
-    let (latency, mtime) = elapsed!(storage
-        .store(0, 0, BLOCK_CONTENT, SystemTime::now())
-        .await
-        .unwrap());
-    assert!(latency.as_millis() < 2, "latency = {latency:?}");
-
-    let (latency, _) = elapsed!(storage
-        .load(0, 0, BLOCK_SIZE_IN_BYTES, mtime)
-        .await
-        .unwrap());
-    assert!(latency.as_millis() < 2, "latency = {latency:?}");
-
-    // Update
-    let (latency, _) = elapsed!(storage
-        .store(0, 0, &BLOCK_CONTENT[..4], mtime)
-        .await
-        .unwrap());
-    assert!(latency.as_millis() < 2, "latency = {latency:?}");
-
-    // Invalidate the cache, and update
-    let (latency, mtime) = elapsed!(storage
-        .store(0, 0, &BLOCK_CONTENT[..4], SystemTime::now())
-        .await
-        .unwrap());
-    assert!(latency.as_millis() >= 100, "latency = {latency:?}");
-
-    let (latency, _) = elapsed!(storage
-        .truncate(0, BLOCK_SIZE_IN_BYTES, 4, mtime)
-        .await
-        .unwrap());
-    assert!(latency.as_millis() < 2, "latency = {latency:?}");
-
-    let (latency, _) = elapsed!(storage.truncate(0, 4, 1, SystemTime::now()).await.unwrap());
-    assert!(latency.as_millis() < 2, "latency = {latency:?}");
-
-    // Invalidate the cache, and load
-    let (latency, _) = elapsed!(storage
-        .load(0, 0, BLOCK_SIZE_IN_BYTES, SystemTime::now())
-        .await
-        .unwrap());
-    assert!(latency.as_millis() >= 100, "latency = {latency:?}");
-}
-
-#[tokio::test]
-async fn test_write_back_flush_latency() {
-    let storage = create_storage_with_latency(false).await;
-    let mut mtime = SystemTime::now();
-    for block_id in 0..8 {
-        let offset = block_id.overflow_mul(BLOCK_SIZE_IN_BYTES);
-        mtime = storage
-            .store(0, offset, BLOCK_CONTENT, mtime)
+        let (latency, mtime) = elapsed!(storage
+            .store(0, 0, BLOCK_CONTENT, SystemTime::now())
             .await
-            .unwrap();
-    }
+            .unwrap());
+        assert!(latency.as_millis() >= 100, "latency = {latency:?}");
 
-    // Wait for all blocks being flushed
-    let (latency, ()) = elapsed!(storage.flush(0).await.unwrap());
-    assert!(latency.as_millis() < 110, "latency = {latency:?}");
+        let (latency, _) = elapsed!(storage
+            .load(0, 0, BLOCK_SIZE_IN_BYTES, mtime)
+            .await
+            .unwrap());
+        assert!(latency.as_millis() < 2, "latency = {latency:?}");
+
+        // Update
+        let (latency, _) = elapsed!(storage
+            .store(0, 0, &BLOCK_CONTENT[..4], mtime)
+            .await
+            .unwrap());
+        assert!(latency.as_millis() >= 100, "latency = {latency:?}");
+
+        // Invalidate the cache, and update
+        let (latency, mtime) = elapsed!(storage
+            .store(0, 0, &BLOCK_CONTENT[..4], SystemTime::now())
+            .await
+            .unwrap());
+        assert!(latency.as_millis() >= 200, "latency = {latency:?}");
+
+        let (latency, _) = elapsed!(storage
+            .truncate(0, BLOCK_SIZE_IN_BYTES, 4, mtime)
+            .await
+            .unwrap());
+        assert!(latency.as_millis() >= 100, "latency = {latency:?}");
+
+        let (latency, _) = elapsed!(storage.truncate(0, 4, 1, SystemTime::now()).await.unwrap());
+        assert!(latency.as_millis() >= 100, "latency = {latency:?}");
+
+        // Invalid the cache, and load
+        let (latency, _) = elapsed!(storage
+            .load(0, 0, BLOCK_SIZE_IN_BYTES, SystemTime::now())
+            .await
+            .unwrap());
+        assert!(latency.as_millis() >= 100, "latency = {latency:?}");
+    });
+}
+
+#[rstest]
+fn test_write_back_latency() {
+    shared_runtime_test(async {
+        let storage = create_storage_with_latency(false).await;
+
+        let (latency, mtime) = elapsed!(storage
+            .store(0, 0, BLOCK_CONTENT, SystemTime::now())
+            .await
+            .unwrap());
+        assert!(latency.as_millis() < 2, "latency = {latency:?}");
+
+        let (latency, _) = elapsed!(storage
+            .load(0, 0, BLOCK_SIZE_IN_BYTES, mtime)
+            .await
+            .unwrap());
+        assert!(latency.as_millis() < 2, "latency = {latency:?}");
+
+        // Update
+        let (latency, _) = elapsed!(storage
+            .store(0, 0, &BLOCK_CONTENT[..4], mtime)
+            .await
+            .unwrap());
+        assert!(latency.as_millis() < 2, "latency = {latency:?}");
+
+        // Invalidate the cache, and update
+        let (latency, mtime) = elapsed!(storage
+            .store(0, 0, &BLOCK_CONTENT[..4], SystemTime::now())
+            .await
+            .unwrap());
+        assert!(latency.as_millis() >= 100, "latency = {latency:?}");
+
+        let (latency, _) = elapsed!(storage
+            .truncate(0, BLOCK_SIZE_IN_BYTES, 4, mtime)
+            .await
+            .unwrap());
+        assert!(latency.as_millis() < 2, "latency = {latency:?}");
+
+        let (latency, _) = elapsed!(storage.truncate(0, 4, 1, SystemTime::now()).await.unwrap());
+        assert!(latency.as_millis() < 2, "latency = {latency:?}");
+
+        // Invalidate the cache, and load
+        let (latency, _) = elapsed!(storage
+            .load(0, 0, BLOCK_SIZE_IN_BYTES, SystemTime::now())
+            .await
+            .unwrap());
+        assert!(latency.as_millis() >= 100, "latency = {latency:?}");
+    });
+}
+
+#[rstest]
+fn test_write_back_flush_latency() {
+    shared_runtime_test(async {
+        let storage = create_storage_with_latency(false).await;
+        let mut mtime = SystemTime::now();
+        for block_id in 0..8 {
+            let offset = block_id.overflow_mul(BLOCK_SIZE_IN_BYTES);
+            mtime = storage
+                .store(0, offset, BLOCK_CONTENT, mtime)
+                .await
+                .unwrap();
+        }
+
+        // Wait for all blocks being flushed
+        let (latency, ()) = elapsed!(storage.flush(0).await.unwrap());
+        assert!(latency.as_millis() < 110, "latency = {latency:?}");
+    });
 }

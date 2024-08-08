@@ -6,8 +6,10 @@ use std::time::{Duration, SystemTime};
 
 use clippy_utilities::OverflowArithmetic;
 use crossbeam_utils::atomic::AtomicCell;
+use rstest::rstest;
 
 use crate::async_fuse::fuse::fuse_reply::AsIoSlice;
+use crate::common::task_manager::shared_runtime_test;
 use crate::storage::policy::LruPolicy;
 use crate::storage::{
     Block, BlockCoordinate, MemoryCacheBuilder, MemoryStorage, Storage, StorageManager,
@@ -82,106 +84,110 @@ async fn create_storage_for_concurrent_test() -> Arc<StorageManager<impl Storage
     Arc::new(StorageManager::new(cache, BLOCK_SIZE))
 }
 
-#[tokio::test]
-async fn test_concurrency_aligned() {
-    let byte_offset = 0;
+#[rstest]
+fn test_concurrency_aligned() {
+    shared_runtime_test(async {
+        let byte_offset = 0;
 
-    let storage = create_storage_for_concurrent_test().await;
+        let storage = create_storage_for_concurrent_test().await;
 
-    let write_pointer = Arc::new(AtomicUsize::new(0));
-    let mtime = Arc::new(AtomicCell::new(SystemTime::now()));
+        let write_pointer = Arc::new(AtomicUsize::new(0));
+        let mtime = Arc::new(AtomicCell::new(SystemTime::now()));
 
-    // writer
-    let writer = {
-        let storage = Arc::clone(&storage);
-        let write_pointer = Arc::clone(&write_pointer);
-        let mtime = Arc::clone(&mtime);
-        tokio::spawn(create_writer(storage, write_pointer, mtime, byte_offset))
-    };
+        // writer
+        let writer = {
+            let storage = Arc::clone(&storage);
+            let write_pointer = Arc::clone(&write_pointer);
+            let mtime = Arc::clone(&mtime);
+            tokio::spawn(create_writer(storage, write_pointer, mtime, byte_offset))
+        };
 
-    // reader 1
-    let reader1 = {
-        let storage = Arc::clone(&storage);
-        let write_pointer = Arc::clone(&write_pointer);
-        let mtime = Arc::clone(&mtime);
-        tokio::spawn(create_reader(
-            storage,
-            write_pointer,
-            mtime,
-            0,
-            byte_offset,
-            2,
-        ))
-    };
+        // reader 1
+        let reader1 = {
+            let storage = Arc::clone(&storage);
+            let write_pointer = Arc::clone(&write_pointer);
+            let mtime = Arc::clone(&mtime);
+            tokio::spawn(create_reader(
+                storage,
+                write_pointer,
+                mtime,
+                0,
+                byte_offset,
+                2,
+            ))
+        };
 
-    // reader 2
-    let reader2 = {
-        let storage = Arc::clone(&storage);
-        let write_pointer = Arc::clone(&write_pointer);
-        let mtime = Arc::clone(&mtime);
-        tokio::spawn(create_reader(
-            storage,
-            write_pointer,
-            mtime,
-            1,
-            byte_offset,
-            2,
-        ))
-    };
+        // reader 2
+        let reader2 = {
+            let storage = Arc::clone(&storage);
+            let write_pointer = Arc::clone(&write_pointer);
+            let mtime = Arc::clone(&mtime);
+            tokio::spawn(create_reader(
+                storage,
+                write_pointer,
+                mtime,
+                1,
+                byte_offset,
+                2,
+            ))
+        };
 
-    writer.await.unwrap();
-    reader1.await.unwrap();
-    reader2.await.unwrap();
+        writer.await.unwrap();
+        reader1.await.unwrap();
+        reader2.await.unwrap();
+    });
 }
 
-#[tokio::test]
-async fn test_concurrency_unaligned() {
-    let byte_offset = 4;
+#[rstest]
+fn test_concurrency_unaligned() {
+    shared_runtime_test(async {
+        let byte_offset = 4;
 
-    let storage = create_storage_for_concurrent_test().await;
+        let storage = create_storage_for_concurrent_test().await;
 
-    let write_pointer = Arc::new(AtomicUsize::new(0));
-    let mtime = Arc::new(AtomicCell::new(SystemTime::now()));
+        let write_pointer = Arc::new(AtomicUsize::new(0));
+        let mtime = Arc::new(AtomicCell::new(SystemTime::now()));
 
-    // writer
-    let writer = {
-        let storage = Arc::clone(&storage);
-        let write_pointer = Arc::clone(&write_pointer);
-        let mtime = Arc::clone(&mtime);
-        tokio::spawn(create_writer(storage, write_pointer, mtime, byte_offset))
-    };
+        // writer
+        let writer = {
+            let storage = Arc::clone(&storage);
+            let write_pointer = Arc::clone(&write_pointer);
+            let mtime = Arc::clone(&mtime);
+            tokio::spawn(create_writer(storage, write_pointer, mtime, byte_offset))
+        };
 
-    // reader 1
-    let reader1 = {
-        let storage = Arc::clone(&storage);
-        let write_pointer = Arc::clone(&write_pointer);
-        let mtime = Arc::clone(&mtime);
-        tokio::spawn(create_reader(
-            storage,
-            write_pointer,
-            mtime,
-            0,
-            byte_offset,
-            2,
-        ))
-    };
+        // reader 1
+        let reader1 = {
+            let storage = Arc::clone(&storage);
+            let write_pointer = Arc::clone(&write_pointer);
+            let mtime = Arc::clone(&mtime);
+            tokio::spawn(create_reader(
+                storage,
+                write_pointer,
+                mtime,
+                0,
+                byte_offset,
+                2,
+            ))
+        };
 
-    // reader 2
-    let reader2 = {
-        let storage = Arc::clone(&storage);
-        let write_pointer = Arc::clone(&write_pointer);
-        let mtime = Arc::clone(&mtime);
-        tokio::spawn(create_reader(
-            storage,
-            write_pointer,
-            mtime,
-            1,
-            byte_offset,
-            2,
-        ))
-    };
+        // reader 2
+        let reader2 = {
+            let storage = Arc::clone(&storage);
+            let write_pointer = Arc::clone(&write_pointer);
+            let mtime = Arc::clone(&mtime);
+            tokio::spawn(create_reader(
+                storage,
+                write_pointer,
+                mtime,
+                1,
+                byte_offset,
+                2,
+            ))
+        };
 
-    writer.await.unwrap();
-    reader1.await.unwrap();
-    reader2.await.unwrap();
+        writer.await.unwrap();
+        reader1.await.unwrap();
+        reader2.await.unwrap();
+    });
 }

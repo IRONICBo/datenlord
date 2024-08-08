@@ -5,11 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use datenlord::config::SoftLimit;
-use once_cell::sync::Lazy;
 use rstest::rstest;
-use tokio::runtime::Runtime;
 
 use super::{MemoryCache, MemoryCacheBuilder};
+use crate::common::task_manager::shared_runtime_test;
 use crate::storage::mock::MemoryStorage;
 use crate::storage::policy::LruPolicy;
 use crate::storage::{Block, BlockCoordinate, Storage, StorageError};
@@ -19,23 +18,6 @@ const BLOCK_CONTENT: &[u8; BLOCK_SIZE_IN_BYTES] = b"foo bar ";
 const CACHE_CAPACITY_IN_BLOCKS: usize = 4;
 
 type MemoryCacheType = MemoryCache<LruPolicy<BlockCoordinate>, Arc<MemoryStorage>>;
-
-// Shared runtime for all tests
-#[allow(clippy::unwrap_used)]
-static RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
-    Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap(),
-    )
-});
-
-// Run the test with the shared runtime
-fn shared_runtime_test<F: std::future::Future>(f: F) -> F::Output {
-    RUNTIME.handle().block_on(f)
-}
 
 async fn prepare_empty_storage() -> (Arc<MemoryStorage>, Arc<MemoryCacheType>) {
     let policy = LruPolicy::<BlockCoordinate>::new(CACHE_CAPACITY_IN_BLOCKS);

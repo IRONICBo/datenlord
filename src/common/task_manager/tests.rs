@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use nix::sys::signal::Signal::SIGTERM;
+use once_cell::sync::Lazy;
+use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -13,6 +15,28 @@ use super::TaskManager;
 use crate::common::task_manager::manager::SpawnError;
 use crate::common::task_manager::task::{TaskName, EDGES};
 use crate::common::task_manager::{wait_for_shutdown, TASK_MANAGER};
+
+// Shared runtime for all unit tests.
+#[allow(clippy::unwrap_used)]
+pub static RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
+    Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap(),
+    )
+});
+
+// Get the shared runtime handle
+pub fn shared_runtime_handle() -> Arc<Runtime> {
+    RUNTIME.clone()
+}
+
+// Run the test with the shared runtime
+pub fn shared_runtime_test<F: std::future::Future>(f: F) -> F::Output {
+    RUNTIME.handle().block_on(f)
+}
 
 #[tokio::test]
 async fn test_dependency_graph() {
