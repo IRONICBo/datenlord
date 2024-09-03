@@ -1,7 +1,7 @@
 use std::{
     cell::UnsafeCell,
     fmt::{self, Debug},
-    sync::Arc,
+    sync::Arc, time::Duration,
 };
 
 use async_trait::async_trait;
@@ -34,7 +34,7 @@ pub trait RpcServerConnectionHandler {
         &self,
         req_header: ReqHeader,
         req_buffer: &[u8],
-        done_tx: mpsc::Sender<Vec<u8>>,
+        done_tx: mpsc::UnboundedSender<Vec<u8>>,
     );
 }
 
@@ -108,7 +108,7 @@ where
     /// Recv request header from the stream
     pub async fn recv_header(&self) -> Result<ReqHeader, RpcError> {
         // Try to read to buffer
-        match self.recv_len(REQ_HEADER_SIZE).await {
+        match self.recv_len(REQ_HEADER_SIZE, self.timeout_options.idle_timeout).await {
             Ok(()) => {}
             Err(err) => {
                 debug!("Failed to receive request header: {:?}", err);
@@ -124,11 +124,11 @@ where
     }
 
     /// Recv request body from the stream
-    pub async fn recv_len(&self, len: u64) -> Result<(), RpcError> {
+    pub async fn recv_len(&self, len: u64, recv_timeout: Duration) -> Result<(), RpcError> {
         let mut req_buffer: &mut BytesMut = unsafe { &mut *self.req_buf.get() };
         req_buffer.resize(u64_to_usize(len), 0);
         let reader = self.get_stream_mut();
-        match read_exact_timeout!(reader, &mut req_buffer, self.timeout_options.read_timeout).await
+        match read_exact_timeout!(reader, &mut req_buffer, recv_timeout).await
         {
             Ok(size) => {
                 debug!("Received request body: {:?}", size);
@@ -186,11 +186,11 @@ where
     }
 
     /// Dispatch the handler for the connection.
-    async fn dispatch(&self, req_header: ReqHeader, done_tx: mpsc::Sender<Vec<u8>>) {
+    async fn dispatch(&self, req_header: ReqHeader, done_tx: mpsc::UnboundedSender<Vec<u8>>) {
         // Dispatch the handler for the connection
         let seq = req_header.seq;
         let body_len = req_header.len;
-        if let Ok(req_type) = ReqType::from_u8(req_header.op) {
+        if let Ok(req_type) = ReqType::try_from(req_header.op) {
             debug!(
                 "Dispatch request with header type: {:?}, seq: {:?}, body_len: {:?}",
                 req_type, seq, body_len
@@ -201,7 +201,7 @@ where
                 // In current implementation, we just send keepalive header to the client stream
                 let resp_header = RespHeader {
                     seq,
-                    op: RespType::KeepAliveResponse.to_u8(),
+                    op: RespType::KeepAliveResponse.into(),
                     len: 0,
                 };
                 // Only one process will access this buffer, so we can use this buffer directly.
@@ -214,7 +214,7 @@ where
                 }
             } else {
                 // Try to read the request body
-                match self.inner.recv_len(body_len).await {
+                match self.inner.recv_len(body_len, self.inner.timeout_options.read_timeout).await {
                     Ok(()) => {}
                     Err(err) => {
                         error!("Failed to receive request body: {:?}", err);
@@ -242,7 +242,7 @@ where
         debug!("RpcServerConnection::Received a new TcpStream.");
 
         // TODO: copy done_tx to the worker pool
-        let (done_tx, mut done_rx) = mpsc::channel::<Vec<u8>>(10000);
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
         // Send response to the stream from the worker pool
         // Worker pool will handle the response sending
@@ -464,7 +464,7 @@ mod tests {
             &self,
             _req_header: ReqHeader,
             _req_buffer: &[u8],
-            _done_tx: mpsc::Sender<Vec<u8>>,
+            _done_tx: mpsc::UnboundedSender<Vec<u8>>,
         ) {
             // Dispatch the handler for the connection
             debug!("Dispatched handler for the connection");

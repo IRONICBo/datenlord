@@ -452,7 +452,7 @@ mod tests {
         let (tx, rx) = flume::unbounded::<Result<(), RpcError>>();
 
         // Success
-        let packet = TestPacket {
+        let mut packet = TestPacket {
             seq: 1,
             op: 2,
             timestamp: 0,
@@ -460,7 +460,7 @@ mod tests {
             sender: tx.clone(),
             request: TestRequest { mock: 0 },
         };
-        packets_keeper.add_task(&mut packet.clone()).unwrap();
+        packets_keeper.add_task(&mut packet).unwrap();
         packets_keeper
             .take_task(packet.seq(), &mut BytesMut::new())
             .await
@@ -473,7 +473,7 @@ mod tests {
         }
 
         // Mark timeout
-        let packet_2 = TestPacket {
+        let mut packet_2 = TestPacket {
             seq: 2,
             op: 2,
             timestamp: 0,
@@ -481,7 +481,7 @@ mod tests {
             sender: tx.clone(),
             request: TestRequest { mock: 0 },
         };
-        packets_keeper.add_task(&mut packet_2.clone()).unwrap();
+        packets_keeper.add_task(&mut packet_2).unwrap();
         sleep(time::Duration::from_secs(2));
         packets_keeper.clean_timeout_tasks().await;
         match rx.recv() {
@@ -493,7 +493,7 @@ mod tests {
         }
 
         // Purge the timeout task
-        let packet_3 = TestPacket {
+        let mut packet_3 = TestPacket {
             seq: 3,
             op: 2,
             timestamp: 0,
@@ -501,7 +501,7 @@ mod tests {
             sender: tx.clone(),
             request: TestRequest { mock: 0 },
         };
-        packets_keeper.add_task(&mut packet_3.clone()).unwrap();
+        packets_keeper.add_task(&mut packet_3).unwrap();
         packets_keeper.purge_outdated_tasks().await;
         match rx.recv() {
             Ok(res) => {

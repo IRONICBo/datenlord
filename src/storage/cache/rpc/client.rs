@@ -2,20 +2,20 @@ use std::{
     cell::UnsafeCell,
     fmt::Debug,
     pin::Pin,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{atomic::{AtomicBool, AtomicU64}, Arc},
     task::{Context, Poll},
 };
 
 use bytes::BytesMut;
 use futures::{pin_mut, Future};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncWriteExt, ReadBuf},
     net::TcpStream,
     time::{Instant, Interval},
 };
 use tracing::debug;
 
-use crate::{read_exact_timeout, write_all_timeout};
+use crate::write_all_timeout;
 
 use super::{
     common::{self, ClientTimeoutOptions},
@@ -53,6 +53,8 @@ where
     req_buf: UnsafeCell<BytesMut>,
     /// The Client ID for the connection
     client_id: u64,
+    /// Is closed flag
+    is_closed: AtomicBool,
 }
 
 // TODO: Add markable id for this client
@@ -88,11 +90,12 @@ where
                 common::DEFAULT_TCP_REQUEST_BUFFER_SIZE,
             )),
             client_id,
+            is_closed: AtomicBool::new(false),
         }
     }
 
     /// Recv request header from the stream
-    pub async fn recv_header(&self) -> Result<RespHeader, RpcError> {
+    async fn recv_header(&self) -> Result<RespHeader, RpcError> {
         // Try to read to buffer
         match self.recv_len(REQ_HEADER_SIZE).await {
             Ok(()) => {}
@@ -110,18 +113,21 @@ where
     }
 
     /// Receive response body from the server.
-    pub async fn recv_len(&self, len: u64) -> Result<(), RpcError> {
-        let mut req_buffer: &mut BytesMut = unsafe { &mut *self.resp_buf.get() };
+    async fn recv_len(&self, len: u64) -> Result<(), RpcError> {
+        let req_buffer: &mut BytesMut = unsafe { &mut *self.resp_buf.get() };
         req_buffer.resize(u64_to_usize(len), 0);
-        let reader = self.get_stream_mut();
-        match read_exact_timeout!(reader, &mut req_buffer, self.timeout_options.read_timeout).await
-        {
+        // let reader = self.get_stream_mut();
+
+        let recv_len_future = RecvLenFuture::new(self, len, req_buffer);
+
+        // Block here until the client is dropped or stream error.
+        match recv_len_future.await {
             Ok(size) => {
-                debug!("{:?} Received response body len: {:?}", self, size);
+                debug!("Received response body size: {:?}", size);
                 Ok(())
             }
             Err(err) => {
-                debug!("{:?} Failed to receive response header: {:?}", self, err);
+                debug!("Failed to receive response header: {:?}", err);
                 Err(RpcError::InternalError(err.to_string()))
             }
         }
@@ -131,7 +137,7 @@ where
     /// We need to make sure
     /// Current send packet need to be in one task, so if we need to send ping and packet
     /// we need to make sure only one operation is running, like select.
-    pub async fn send_data(
+    async fn send_data(
         &self,
         req_header: &dyn Encode,
         req_body: Option<&dyn Encode>,
@@ -157,12 +163,12 @@ where
     }
 
     /// Get the next sequence number.
-    pub fn next_seq(&self) -> u64 {
+    fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Send keep alive message to the server
-    pub async fn ping(&self) -> Result<(), RpcError> {
+    async fn ping(&self) -> Result<(), RpcError> {
         // Send keep alive message
         let current_seq = self.next_seq();
         let current_timestamp = self.clock_instant.elapsed().as_secs();
@@ -180,7 +186,7 @@ where
         // Set to packet task
         let keep_alive_msg = ReqHeader {
             seq: current_seq,
-            op: ReqType::KeepAliveRequest.to_u8(),
+            op: ReqType::KeepAliveRequest.into(),
             len: 0,
         };
 
@@ -196,7 +202,7 @@ where
     }
 
     /// Send packet by the client.
-    pub async fn send_packet(&self, req_packet: &mut P) -> Result<(), RpcError> {
+    async fn send_packet(&self, mut req_packet: P) -> Result<(), RpcError> {
         let current_seq = self.next_seq();
         req_packet.set_seq(current_seq);
         debug!("{:?} Try to send request: {:?}", self, current_seq);
@@ -210,11 +216,11 @@ where
         };
 
         // concate req_header and req_buffer
-        if let Ok(()) = self.send_data(&req_header, Some(req_packet)).await {
+        if let Ok(()) = self.send_data(&req_header, Some(&req_packet)).await {
             debug!("{:?} Sent request success: {:?}", self, req_packet.seq());
             // We have set a copy to keeper and manage the status for the packets keeper
             // Set to packet task with clone
-            self.packets_keeper.add_task(req_packet)?;
+            self.packets_keeper.add_task(&mut req_packet)?;
 
             Ok(())
         } else {
@@ -224,7 +230,7 @@ where
     }
 
     /// Receive loop for the client.
-    pub async fn recv_loop(&self) {
+    async fn recv_loop(&self) {
         // Check and clean keeper timeout unused task
         // The timeout data will be cleaned by the get function
         // We don't need to clean the timeout data radically
@@ -245,7 +251,7 @@ where
                     self.received_keepalive_timestamp
                         .store(current_timestamp, std::sync::atomic::Ordering::Release);
                     // Update the received keep alive seq
-                    if let Ok(resp_type) = RespType::from_u8(header.op) {
+                    if let Ok(resp_type) = RespType::try_from(header.op) {
                         if let RespType::FileBlockResponse = resp_type {
                             debug!("{:?} Received response header: {:?}", self, header);
                             // Try to read to buffer
@@ -282,6 +288,9 @@ where
                 }
             }
         }
+
+        // Purge all the tasks
+        self.packets_keeper.purge_outdated_tasks().await;
     }
 
     /// Get stream with mutable reference
@@ -351,7 +360,7 @@ where
     /// Try to send data to channel, if the channel is full, return an error.
     /// Contains the rezquest header and body.
     /// WARN: this function does not support concurrent call
-    pub async fn send_request(&self, req: &mut P) -> Result<(), RpcError> {
+    pub async fn send_request(&self, req: P) -> Result<(), RpcError> {
         self.inner_connection
             .send_packet(req)
             .await
@@ -364,6 +373,65 @@ where
     /// WARN: this function does not support concurrent call
     pub async fn ping(&self) -> Result<(), RpcError> {
         self.inner_connection.ping().await
+    }
+}
+
+/// `StreamReaderFuture` TCP Stream reader future for receive data
+/// We need to keep block the stream until the data is received
+/// or the stream is closed or client is dropped
+/// The future will be used to receive the response from the server
+struct RecvLenFuture<'a, P>
+where
+    P: Packet + Clone + Send + Sync + 'static,
+{
+    client: &'a RpcClientConnectionInner<P>,
+    len: u64,
+    req_buffer: &'a mut BytesMut,
+}
+
+impl<'a, P> RecvLenFuture<'a, P>
+where
+    P: Packet + Clone + Send + Sync + 'static,
+{
+    fn new(client: &'a RpcClientConnectionInner<P>, len: u64, req_buffer: &'a mut BytesMut) -> Self {
+        Self {
+            client,
+            len,
+            req_buffer,
+        }
+    }
+}
+
+impl<P> Future for RecvLenFuture<'_, P>
+where
+    P: Packet + Clone + Send + Sync + 'static,
+{
+    type Output = Result<(), RpcError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        if this.client.is_closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Poll::Ready(Err(RpcError::Timeout("Client is closed".to_owned())));
+        }
+
+        // Resize the buffer to accommodate the incoming data
+        this.req_buffer.resize(u64_to_usize(this.len), 0);
+
+        let mut reader = this.client.get_stream_mut();
+        let mut read_buf = ReadBuf::new(&mut this.req_buffer[..]);
+
+        match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
+            Poll::Ready(Ok(size)) => {
+                debug!("Received response body size: {:?}", size);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => {
+                debug!("Failed to receive response header: {:?}", err);
+                Poll::Ready(Err(RpcError::InternalError(err.to_string())))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -555,7 +623,7 @@ mod tests {
         let mut buf = BytesMut::new();
         RespHeader {
             seq: 1,
-            op: RespType::KeepAliveResponse.to_u8(),
+            op: RespType::KeepAliveResponse.into(),
             len: 0,
         }
         .encode(&mut buf);
@@ -570,7 +638,8 @@ mod tests {
         let connection = RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123);
         let header = connection.recv_header().await.unwrap();
         assert_eq!(header.seq, 1);
-        assert_eq!(header.op, RespType::KeepAliveResponse.to_u8());
+        let resp_op: u8 = RespType::KeepAliveResponse.into();
+        assert_eq!(header.op, resp_op);
     }
 
     #[tokio::test]
@@ -612,7 +681,7 @@ mod tests {
         let connection = RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123);
         let req_header = ReqHeader {
             seq: 1,
-            op: ReqType::KeepAliveRequest.to_u8(),
+            op: ReqType::KeepAliveRequest.into(),
             len: 0,
         };
 
@@ -647,7 +716,7 @@ mod tests {
         let mut buf = BytesMut::new();
         RespHeader {
             seq: 1,
-            op: RespType::KeepAliveResponse.to_u8(),
+            op: RespType::KeepAliveResponse.into(),
             len: 0,
         }
         .encode(&mut buf);

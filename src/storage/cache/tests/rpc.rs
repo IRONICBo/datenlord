@@ -56,7 +56,7 @@ mod tests {
         /// The file block request.
         request: FileBlockRequest,
         /// The channel for sending the response.
-        done_tx: mpsc::Sender<Vec<u8>>,
+        done_tx: mpsc::UnboundedSender<Vec<u8>>,
     }
 
     impl FileBlockHandler {
@@ -65,7 +65,7 @@ mod tests {
         pub fn new(
             header: ReqHeader,
             request: FileBlockRequest,
-            done_tx: mpsc::Sender<Vec<u8>>,
+            done_tx: mpsc::UnboundedSender<Vec<u8>>,
         ) -> Self {
             Self {
                 header,
@@ -97,7 +97,7 @@ mod tests {
             // Prepare response header
             let resp_header = RespHeader {
                 seq: self.header.seq,
-                op: RespType::FileBlockResponse.to_u8(),
+                op: RespType::FileBlockResponse.into(),
                 len: usize_to_u64(resp_body_buffer.len()),
             };
             let mut resp_header_buffer = BytesMut::new();
@@ -106,7 +106,7 @@ mod tests {
             resp_header_buffer.extend_from_slice(&resp_body_buffer);
 
             // Send response to the done channel
-            match self.done_tx.send(resp_header_buffer.to_vec()).await {
+            match self.done_tx.send(resp_header_buffer.to_vec()) {
                 Ok(()) => {
                     debug!("Sent response to done channel");
                 }
@@ -138,10 +138,10 @@ mod tests {
             &self,
             req_header: ReqHeader,
             req_buffer: &[u8],
-            done_tx: mpsc::Sender<Vec<u8>>,
+            done_tx: mpsc::UnboundedSender<Vec<u8>>,
         ) {
             // Dispatch the handler for the connection
-            if let Ok(req_type) = ReqType::from_u8(req_header.op) {
+            if let Ok(req_type) = ReqType::try_from(req_header.op) {
                 if let ReqType::FileBlockRequest = req_type {
                     // Try to read the request body
                     // Decode the request body
@@ -235,8 +235,8 @@ mod tests {
             block_version: 0,
             hash_ring_version: 1,
         };
-        let mut packet = FileBlockPacket::new(&block_request, tx.clone());
-        rpc_client.send_request(&mut packet).await.unwrap();
+        let packet = FileBlockPacket::new(block_request, tx.clone());
+        rpc_client.send_request(packet).await.unwrap();
 
         loop {
             match rx.recv_async().await {

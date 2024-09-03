@@ -2,6 +2,7 @@ use std::mem;
 
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tracing::error;
 
 use crate::async_fuse::util::usize_to_u64;
@@ -13,65 +14,23 @@ use super::{
 };
 
 /// The request type of the request.
-#[derive(Debug)]
+#[derive(Debug, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
 pub enum ReqType {
     /// The keep alive request.
-    KeepAliveRequest,
+    KeepAliveRequest = 0,
     /// The file block request.
-    FileBlockRequest,
-}
-
-impl ReqType {
-    /// Convert u8 to `ReqType`
-    pub fn from_u8(op: u8) -> Result<Self, RpcError> {
-        match op {
-            0 => Ok(Self::KeepAliveRequest),
-            1 => Ok(Self::FileBlockRequest),
-            _ => Err(RpcError::InternalError(format!(
-                "Invalid operation type: {op}"
-            ))),
-        }
-    }
-
-    /// Convert `ReqType` to u8
-    #[must_use]
-    pub fn to_u8(&self) -> u8 {
-        match *self {
-            Self::KeepAliveRequest => 0,
-            Self::FileBlockRequest => 1,
-        }
-    }
+    FileBlockRequest = 1,
 }
 
 /// The operation type of the response.
-#[derive(Debug)]
+#[derive(Debug, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
 pub enum RespType {
     /// The keep alive response.
-    KeepAliveResponse,
+    KeepAliveResponse = 0,
     /// The file block response.
-    FileBlockResponse,
-}
-
-impl RespType {
-    /// Convert u8 to `RespType`
-    pub fn from_u8(op: u8) -> Result<Self, RpcError> {
-        match op {
-            0 => Ok(Self::KeepAliveResponse),
-            1 => Ok(Self::FileBlockResponse),
-            _ => Err(RpcError::InternalError(format!(
-                "Invalid operation type: {op}"
-            ))),
-        }
-    }
-
-    /// Convert `RespType` to u8
-    #[must_use]
-    pub fn to_u8(&self) -> u8 {
-        match *self {
-            Self::KeepAliveResponse => 0,
-            Self::FileBlockResponse => 1,
-        }
-    }
+    FileBlockResponse = 1,
 }
 
 /// Common data structures shared between the client and server.
@@ -154,12 +113,7 @@ impl Encode for FileBlockResponse {
         buf.put_u64(self.block_size.to_le());
         buf.put_u64(self.block_version.to_le());
         buf.put_u64(self.hash_ring_version.to_le());
-        match self.status {
-            StatusCode::Success => buf.put_u8(0),
-            StatusCode::NotFound => buf.put_u8(1),
-            StatusCode::InternalError => buf.put_u8(2),
-            StatusCode::VersionMismatch => buf.put_u8(3),
-        }
+        buf.put_u8(self.status.into());
         buf.put_slice(&self.data);
     }
 }
@@ -176,11 +130,11 @@ impl Decode for FileBlockResponse {
         let block_version = get_u64_from_buf(buf, 24)?;
         let hash_ring_version = get_u64_from_buf(buf, 32)?;
         let status = match buf.get(40) {
-            Some(&0) => StatusCode::Success,
-            Some(&1) => StatusCode::NotFound,
-            Some(&2) => StatusCode::InternalError,
-            Some(&3) => StatusCode::VersionMismatch,
-            _ => return Err(RpcError::InternalError("Invalid status code".to_owned())),
+            Some(&status) => match StatusCode::try_from(status) {
+                Ok(status) => status,
+                Err(_) => return Err(RpcError::InternalError("Invalid status code".to_owned())),
+            },
+            None => return Err(RpcError::InternalError("Invalid status code".to_owned())),
         };
         let data = buf.get(41..).unwrap_or(&[]).to_vec();
         let data_len = usize_to_u64(data.len());
@@ -203,16 +157,18 @@ impl Decode for FileBlockResponse {
 }
 
 /// The status code of the response.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
+
 pub enum StatusCode {
     /// The request is successful.
-    Success,
+    Success = 0,
     /// The request is not found.
-    NotFound,
+    NotFound = 1,
     /// The request is invalid.
-    InternalError,
+    InternalError = 2,
     /// The request is out dated.
-    VersionMismatch,
+    VersionMismatch = 3,
 }
 
 impl Default for StatusCode {
@@ -244,15 +200,15 @@ impl FileBlockPacket {
     /// Create a new file block packet.
     #[must_use]
     pub fn new(
-        block_request: &FileBlockRequest,
+        block_request: FileBlockRequest,
         done_tx: flume::Sender<Result<FileBlockResponse, FileBlockRequest>>,
     ) -> Self {
         Self {
             // Will be auto set by client
             seq: 0,
             // Set operation
-            op: ReqType::FileBlockRequest.to_u8(),
-            request: block_request.clone(),
+            op: ReqType::FileBlockRequest.into(),
+            request: block_request,
             timestamp: 0,
             response: None,
             done_tx,
@@ -429,7 +385,7 @@ mod test {
         };
 
         let (done_tx, _) = flume::unbounded();
-        let packet = FileBlockPacket::new(&request, done_tx);
+        let packet = FileBlockPacket::new(request, done_tx);
 
         let mut buffer = BytesMut::new();
         packet.encode(&mut buffer);
