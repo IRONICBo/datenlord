@@ -11,7 +11,7 @@ pub mod direntry;
 mod metadata;
 mod node;
 /// Opened files
-mod open_file;
+pub mod open_file;
 /// fs metadata with S3 backend module
 mod s3_metadata;
 mod s3_node;
