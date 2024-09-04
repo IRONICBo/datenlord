@@ -33,7 +33,6 @@ pub use s3_metadata::S3MetaData;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, instrument, warn};
 
-use self::kv_engine::KVEngineType;
 use crate::async_fuse::fuse::file_system::FileSystem;
 use crate::async_fuse::fuse::fuse_reply::{
     ReplyAttr, ReplyBMap, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
@@ -168,20 +167,19 @@ pub fn check_type_supported(file_type: &SFlag) -> DatenLordResult<()> {
 impl<M: MetaData + Send + Sync + 'static> MemFs<M> {
     /// Create `FileSystem`
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
+    pub fn new(
         mount_point: &str,
         capacity: usize,
-        kv_engine: Arc<KVEngineType>,
-        node_id: &str,
         storage_config: &StorageConfig,
         storage: StorageType,
-    ) -> anyhow::Result<Self> {
+        node_id: &str,
+        metadata: Arc<M>,
+    ) -> Self {
         info!(
             "mount_point: ${}$, capacity: ${}$, node_id: {}, storage_config: {:?}",
             mount_point, capacity, node_id, storage_config
         );
-        let metadata = M::new(kv_engine, node_id).await?;
-        Ok(Self { metadata, storage })
+        Self { metadata, storage }
     }
 }
 

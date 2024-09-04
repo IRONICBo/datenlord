@@ -9,7 +9,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use super::super::policy::LruPolicy;
 use super::super::{
@@ -139,6 +139,24 @@ async fn write_back_block(task: Arc<WriteTask>) -> StorageResult<()> {
         }
     }
 
+    // Send the meta commit task.
+    let meta_task = Arc::new(MetaCommitTask { ino: task.ino });
+    match task
+        .meta_task_sender
+        .send(MetaTask::Pending(meta_task))
+        .await
+    {
+        Ok(()) => {
+            debug!(
+                "Send meta task successfully, current meta task is {:?}",
+                task
+            );
+        }
+        Err(e) => {
+            error!("Failed to send meta task, the error is {e}.");
+        }
+    }
+
     Ok(())
 }
 
@@ -167,9 +185,9 @@ async fn write_blocks(tasks: &Vec<Arc<WriteTask>>) -> Option<StorageError> {
 /// The `commit_meta_data` function represents the meta data commit operation.
 async fn commit_meta_data<M: MetaData + Send + Sync + 'static>(
     metadata_client: Arc<M>,
-    to_be_commited_inos: &HashSet<u64>,
+    to_be_committed_inos: &HashSet<u64>,
 ) {
-    for ino in to_be_commited_inos {
+    for ino in to_be_committed_inos {
         if let Err(e) = metadata_client.write_remote_helper(ino.to_owned()).await {
             error!("Failed to commit meta data, the error is {e}.");
         }
@@ -184,22 +202,30 @@ async fn meta_commit_work<M: MetaData + Send + Sync + 'static>(
 ) {
     // We will receive the meta write back message here and flush open_files status to meta data server,
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-    let mut to_be_commited_inos = HashSet::new();
+    let mut to_be_committed_inos = HashSet::new();
     loop {
         tokio::select! {
             Some(task) = meta_task_receiver.recv() => {
                 match task {
                     MetaTask::Pending(meta_task) => {
                         let ino = meta_task.ino;
-                        to_be_commited_inos.insert(ino);
+                        to_be_committed_inos.insert(ino);
                     }
                     MetaTask::Flush(tx) => {
+                        // Commit immediately.
+                        commit_meta_data(Arc::clone(&metadata_client), &to_be_committed_inos).await;
+                        to_be_committed_inos.clear();
+
                         // Flush the open_files to the meta data server.
                         if let Err(Some(e)) = tx.send(None) {
                             error!("Failed to send storage error back to `Writer`, the error is {e}.");
                         }
                     }
                     MetaTask::Finish(tx) => {
+                        // Commit immediately.
+                        commit_meta_data(Arc::clone(&metadata_client), &to_be_committed_inos).await;
+                        to_be_committed_inos.clear();
+
                         // Flush the open_files to the meta data server.
                         if let Err(Some(e)) = tx.send(None) {
                             error!("Failed to send storage error back to `Writer`, the error is {e}.");
@@ -209,8 +235,8 @@ async fn meta_commit_work<M: MetaData + Send + Sync + 'static>(
                 }
             }
             _ = interval.tick() => {
-                commit_meta_data(Arc::clone(&metadata_client), &to_be_commited_inos).await;
-                to_be_commited_inos.clear();
+                commit_meta_data(Arc::clone(&metadata_client), &to_be_committed_inos).await;
+                to_be_committed_inos.clear();
             }
         }
     }
@@ -400,6 +426,18 @@ impl Writer {
             .await
             .unwrap_or_else(|_| {
                 panic!("Should not send command to write back task when the task quits.");
+            });
+
+        rx.await
+            .unwrap_or_else(|_| panic!("The sender should not be closed."))
+            .map_or(Ok(()), Err)?;
+
+        let (tx, rx) = oneshot::channel();
+        self.meta_task_sender
+            .send(MetaTask::Flush(tx))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("Should not send command to meta task when the task quits.");
             });
 
         rx.await
