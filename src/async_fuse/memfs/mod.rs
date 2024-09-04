@@ -47,7 +47,7 @@ use crate::common::error::{Context, DatenLordResult};
 use crate::new_storage::{Storage, StorageManager};
 
 /// The type of storage
-pub type StorageType = StorageManager;
+pub type StorageType = StorageManager<S3MetaData>;
 
 /// In-memory file system
 #[derive(Debug)]
@@ -333,7 +333,7 @@ impl<M: MetaData + Send + Sync + 'static> FileSystem for MemFs<M> {
         };
         let set_res = self
             .metadata
-            .setattr_helper(context, ino, &param, &self.storage)
+            .setattr_helper::<S3MetaData>(context, ino, &param, &self.storage)
             .await;
         match set_res {
             Ok((ttl, fuse_attr)) => reply.attr(ttl, fuse_attr).await,
@@ -594,7 +594,10 @@ impl<M: MetaData + Send + Sync + 'static> FileSystem for MemFs<M> {
 
         let new_size = old_size.max(offset.cast::<u64>().overflow_add(data_len));
 
-        let write_result = self.metadata.write_helper(ino, new_mtime, new_size).await;
+        let write_result = self
+            .metadata
+            .write_local_helper(ino, new_mtime, new_size)
+            .await;
         match write_result {
             Ok(()) => reply.written(data_len.cast()).await,
             Err(e) => reply.error(e).await,

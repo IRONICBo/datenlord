@@ -15,8 +15,8 @@ use tracing::level_filters::LevelFilter;
 use tracing::{debug, info}; // warn, error
 
 use crate::async_fuse::fuse::{mount, session};
-use crate::async_fuse::memfs;
 use crate::async_fuse::memfs::kv_engine::{KVEngine, KVEngineType};
+use crate::async_fuse::memfs::{self, MetaData};
 use crate::common::logger::{init_logger, LogRole};
 use crate::new_storage::{BackendBuilder, MemoryCache, StorageManager, BLOCK_SIZE};
 
@@ -74,7 +74,12 @@ async fn run_fs(mount_point: &Path, is_s3: bool, token: CancellationToken) -> an
 
         let cache = Arc::new(Mutex::new(MemoryCache::new(capacity_in_blocks, block_size)));
         let backend = Arc::new(BackendBuilder::new(storage_param.clone()).build().await?);
-        StorageManager::new(cache, backend, block_size)
+
+        let kv_engine: Arc<memfs::kv_engine::etcd_impl::EtcdKVEngine> =
+            Arc::new(KVEngineType::new(vec![TEST_ETCD_ENDPOINT.to_owned()]).await?);
+        let metadata_client = memfs::S3MetaData::new(kv_engine, TEST_NODE_ID).await?;
+
+        StorageManager::new(cache, backend, block_size, metadata_client)
     };
 
     let fs: memfs::MemFs<memfs::S3MetaData> = memfs::MemFs::new(

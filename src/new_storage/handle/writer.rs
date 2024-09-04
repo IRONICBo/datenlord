@@ -1,10 +1,10 @@
 //! The writer implementation.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use clippy_utilities::Cast;
+use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
@@ -17,7 +17,6 @@ use super::super::{
 };
 use crate::async_fuse::memfs::MetaData;
 use crate::new_storage::{StorageError, StorageResult};
-use crate::async_fuse::memfs::open_file::{OpenFile, OpenFiles};
 
 /// The `Writer` struct represents a struct responsible for writing blocks of
 /// data to a backend storage system
@@ -166,12 +165,12 @@ async fn write_blocks(tasks: &Vec<Arc<WriteTask>>) -> Option<StorageError> {
 }
 
 /// The `commit_meta_data` function represents the meta data commit operation.
-async fn commit_meta_data<M: MetaData + Send + Sync + 'static>(metadata_client: Arc<M>, open_files: &HashMap<u64, Arc<RwLock<OpenFile>>>) {
-    for (ino, open_file) in open_files.iter() {
-        let open_file = open_file.read();
-        let meta_task = MetaCommitTask { ino: *ino };
-        let meta_task = Arc::new(meta_task);
-        if let Err(e) = metadata_client.commit_meta_data(&open_file.attr, meta_task).await {
+async fn commit_meta_data<M: MetaData + Send + Sync + 'static>(
+    metadata_client: Arc<M>,
+    to_be_commited_inos: &HashSet<u64>,
+) {
+    for ino in to_be_commited_inos {
+        if let Err(e) = metadata_client.write_remote_helper(ino.to_owned()).await {
             error!("Failed to commit meta data, the error is {e}.");
         }
     }
@@ -179,21 +178,20 @@ async fn commit_meta_data<M: MetaData + Send + Sync + 'static>(metadata_client: 
 
 /// The `meta_commit_work` function represents the meta commit worker.
 #[allow(clippy::pattern_type_mismatch)] // Raised by `tokio::select!`
-async fn meta_commit_work<M: MetaData + Send + Sync + 'static>(metadata_client: Arc<M>, open_files: OpenFiles, mut meta_task_receiver: Receiver<MetaTask>) {
+async fn meta_commit_work<M: MetaData + Send + Sync + 'static>(
+    metadata_client: Arc<M>,
+    mut meta_task_receiver: Receiver<MetaTask>,
+) {
     // We will receive the meta write back message here and flush open_files status to meta data server,
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-    let mut to_be_commited = HashMap::new();
+    let mut to_be_commited_inos = HashSet::new();
     loop {
         tokio::select! {
             Some(task) = meta_task_receiver.recv() => {
                 match task {
                     MetaTask::Pending(meta_task) => {
                         let ino = meta_task.ino;
-                        let open_file = open_files.get(ino);
-                        // Add to the commit list.
-                        if let Some(open_file) = open_file {
-                            to_be_commited.insert(ino, open_file);
-                        }
+                        to_be_commited_inos.insert(ino);
                     }
                     MetaTask::Flush(tx) => {
                         // Flush the open_files to the meta data server.
@@ -211,8 +209,8 @@ async fn meta_commit_work<M: MetaData + Send + Sync + 'static>(metadata_client: 
                 }
             }
             _ = interval.tick() => {
-                commit_meta_data(&to_be_commited).await;
-                to_be_commited.clear();
+                commit_meta_data(Arc::clone(&metadata_client), &to_be_commited_inos).await;
+                to_be_commited_inos.clear();
             }
         }
     }
@@ -275,7 +273,6 @@ impl Writer {
         block_size: usize,
         cache: Arc<Mutex<MemoryCache<CacheKey, LruPolicy<CacheKey>>>>,
         backend: Arc<dyn Backend>,
-        open_files: OpenFiles,
         metadata_client: Arc<M>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -294,7 +291,7 @@ impl Writer {
         let handle = tokio::spawn(write_back_work(rx));
         writer.write_back_handle = tokio::sync::Mutex::new(Some(handle));
 
-        let meta_commit_handle = tokio::spawn(meta_commit_work(metadata_client, open_files, meta_task_rx));
+        let meta_commit_handle = tokio::spawn(meta_commit_work(metadata_client, meta_task_rx));
         writer.meta_task_handle = tokio::sync::Mutex::new(Some(meta_commit_handle));
         writer
     }
@@ -454,16 +451,16 @@ impl Writer {
 
         rx.await
             .unwrap_or_else(|_| panic!("The sender should not be closed."))
-            .map_or(Ok(()), Err);
+            .map_or(Ok(()), Err)?;
 
         let (tx, rx) = oneshot::channel();
         // TODO: handle it by `TaskManager`
         self.meta_task_sender
-        .send(MetaTask::Finish(rx))
-        .await
-        .unwrap_or_else(|_| {
-            panic!("Should not send command to meta task when the task quits.");
-        });
+            .send(MetaTask::Finish(tx))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("Should not send command to meta task when the task quits.");
+            });
 
         self.meta_task_handle
             .lock()
@@ -487,16 +484,28 @@ impl Writer {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::async_fuse::memfs::kv_engine::{KVEngine, KVEngineType};
+    use crate::async_fuse::memfs::{self, S3MetaData};
     use crate::new_storage::backend::backend_impl::memory_backend;
     use crate::new_storage::block::BLOCK_SIZE;
 
     const IO_SIZE: usize = 128 * 1024;
+    const TEST_NODE_ID: &str = "test_node";
+    const TEST_ETCD_ENDPOINT: &str = "127.0.0.1:2379";
+
     #[tokio::test]
     async fn test_writer() {
         let backend = Arc::new(memory_backend().unwrap());
         let manger = Arc::new(Mutex::new(MemoryCache::new(10, BLOCK_SIZE)));
-        let open_files = OpenFiles::new();
-        let writer = Writer::new(1, BLOCK_SIZE, Arc::clone(&manger), backend, open_files);
+
+        let kv_engine: Arc<memfs::kv_engine::etcd_impl::EtcdKVEngine> = Arc::new(
+            KVEngineType::new(vec![TEST_ETCD_ENDPOINT.to_owned()])
+                .await
+                .unwrap(),
+        );
+        let metadata_client = S3MetaData::new(kv_engine, TEST_NODE_ID).await.unwrap();
+
+        let writer = Writer::new(1, BLOCK_SIZE, Arc::clone(&manger), backend, metadata_client);
         let content = Bytes::from_static(&[b'1'; IO_SIZE]);
         let slice = BlockSlice::new(0, 0, content.len().cast());
         writer.write(&content, &[slice]).await.unwrap();

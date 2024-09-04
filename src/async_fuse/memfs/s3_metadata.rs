@@ -245,7 +245,7 @@ impl MetaData for S3MetaData {
                 let attr = node.get_attr();
                 attr.check_perm(context.uid, context.gid, access_mode)?;
                 // Add the file to `open_files`
-                self.open_files.open(ino, attr);
+                drop(self.open_files.open(ino, attr));
                 return Ok(self.allocate_fd());
             }
         }
@@ -309,7 +309,7 @@ impl MetaData for S3MetaData {
     }
 
     #[instrument(skip(self, storage), err, ret)]
-    async fn setattr_helper(
+    async fn setattr_helper<M: MetaData + Send + Sync + 'static>(
         &self,
         context: ReqContext,
         ino: u64,
@@ -752,8 +752,8 @@ impl MetaData for S3MetaData {
         res
     }
 
-    /// Helper function to write data
-    async fn write_helper(
+    /// Helper function to write local meta data
+    async fn write_local_helper(
         &self,
         ino: u64,
         new_mtime: SystemTime,
@@ -765,6 +765,20 @@ impl MetaData for S3MetaData {
             let mut open_file = raw_open_file.write();
             open_file.attr.mtime = new_mtime;
             open_file.attr.size = new_size;
+        }
+        Ok(())
+    }
+
+    /// Helper function to write remote meta data
+    async fn write_remote_helper(&self, ino: u64) -> DatenLordResult<()> {
+        let new_mtime;
+        let new_size;
+
+        {
+            let raw_open_file = self.open_files.get(ino);
+            let open_file = raw_open_file.read();
+            new_mtime = open_file.attr.mtime;
+            new_size = open_file.attr.size;
         }
 
         let (res, retry) = retry_txn!(TXN_RETRY_LIMIT, {

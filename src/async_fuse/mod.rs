@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use clippy_utilities::OverflowArithmetic;
+use memfs::MetaData;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -36,7 +37,10 @@ pub async fn start_async_fuse(
 
         let cache = Arc::new(Mutex::new(MemoryCache::new(capacity_in_blocks, block_size)));
         let backend = Arc::new(BackendBuilder::new(storage_param.clone()).build().await?);
-        StorageManager::new(cache, backend, block_size)
+
+        let metadata_client = memfs::S3MetaData::new(Arc::clone(&kv_engine), &args.node_id).await?;
+
+        StorageManager::new(cache, backend, block_size, metadata_client)
     };
 
     let fs: memfs::MemFs<memfs::S3MetaData> = memfs::MemFs::new(
