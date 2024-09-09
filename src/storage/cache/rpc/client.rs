@@ -140,14 +140,14 @@ where
     async fn send_data(
         &self,
         req_header: &dyn Encode,
-        req_body: Option<&dyn Encode>,
+        packet: Option<P>,
     ) -> Result<(), RpcError> {
         let buf = unsafe { &mut *self.req_buf.get() };
         buf.clear();
         // encode just need to append to buffer, do not clear buffer
         req_header.encode(buf);
         // Append the body to the buffer
-        if let Some(body) = req_body {
+        if let Some(body) = packet {
             // encode just need to append to buffer, do not clear buffer
             body.encode(buf);
         }
@@ -216,15 +216,12 @@ where
         };
 
         // concate req_header and req_buffer
-        if let Ok(()) = self.send_data(&req_header, Some(&req_packet)).await {
-            debug!("{:?} Sent request success: {:?}", self, req_packet.seq());
-            // We have set a copy to keeper and manage the status for the packets keeper
-            // Set to packet task with clone
-            self.packets_keeper.add_task(&mut req_packet)?;
-
+        let req_seq = req_packet.seq();
+        if let Ok(()) = self.send_data(&req_header, Some(req_packet)).await {
+            debug!("{:?} Sent request success: {:?}", self, req_seq);
             Ok(())
         } else {
-            debug!("{:?} Failed to send request: {:?}", self, req_packet.seq());
+            debug!("{:?} Failed to send request: {:?}", self, req_seq);
             Err(RpcError::InternalError("Failed to send request".to_owned()))
         }
     }
@@ -376,7 +373,7 @@ where
     }
 }
 
-/// `StreamReaderFuture` TCP Stream reader future for receive data
+/// `RecvLenFuture` TCP Stream reader future for receive data
 /// We need to keep block the stream until the data is received
 /// or the stream is closed or client is dropped
 /// The future will be used to receive the response from the server
@@ -686,7 +683,7 @@ mod tests {
         };
 
         connection
-            .send_data(&req_header, Some(&TestData {}))
+            .send_data(&req_header, None)
             .await
             .unwrap();
     }
