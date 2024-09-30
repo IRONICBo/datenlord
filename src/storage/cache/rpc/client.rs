@@ -2,16 +2,14 @@ use std::{
     cell::UnsafeCell,
     fmt::Debug,
     pin::Pin,
-    sync::{atomic::{AtomicBool, AtomicU64}, Arc},
+    sync::{atomic::AtomicU64, Arc},
     task::{Context, Poll},
 };
 
 use bytes::BytesMut;
 use futures::{pin_mut, Future};
 use tokio::{
-    io::{AsyncRead, AsyncWriteExt, ReadBuf},
-    net::TcpStream,
-    time::{Instant, Interval},
+    io::{AsyncRead, AsyncWriteExt, ReadBuf}, net::TcpStream, time::{Instant, Interval}
 };
 use tracing::debug;
 
@@ -53,8 +51,10 @@ where
     req_buf: UnsafeCell<BytesMut>,
     /// The Client ID for the connection
     client_id: u64,
-    /// Is closed flag
-    is_closed: AtomicBool,
+    /// Is closed flag sender
+    is_closed_sender: flume::Sender<()>,
+    /// Is closed flag receiver
+    is_closed_receiver: flume::Receiver<()>,
 }
 
 // TODO: Add markable id for this client
@@ -69,6 +69,25 @@ where
     }
 }
 
+/// Drop the client connection, send the close signal to the client
+/// Other side will receive the close signal and close the connection
+impl<P> Drop for RpcClientConnectionInner<P>
+where
+    P: Packet + Clone + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        // Send the close signal to the client
+        match self.is_closed_sender.send(()) {
+            Ok(()) => {
+                debug!("{:?} Send close signal to the client", self);
+            }
+            Err(err) => {
+                debug!("{:?} Failed to send close signal to the client: {:?}", self, err);
+            }
+        }
+    }
+}
+
 impl<P> RpcClientConnectionInner<P>
 where
     P: Packet + Clone + Send + Sync + 'static,
@@ -76,6 +95,7 @@ where
     /// Create a new connection.
     pub fn new(stream: TcpStream, timeout_options: ClientTimeoutOptions, client_id: u64) -> Self {
         let task_timeout = timeout_options.task_timeout.as_secs();
+        let (is_closed_sender, is_closed_receiver) = flume::unbounded();
         Self {
             stream: UnsafeCell::new(stream),
             timeout_options,
@@ -90,7 +110,8 @@ where
                 common::DEFAULT_TCP_REQUEST_BUFFER_SIZE,
             )),
             client_id,
-            is_closed: AtomicBool::new(false),
+            is_closed_sender,
+            is_closed_receiver,
         }
     }
 
@@ -118,7 +139,7 @@ where
         req_buffer.resize(u64_to_usize(len), 0);
         // let reader = self.get_stream_mut();
 
-        let recv_len_future = RecvLenFuture::new(self, len, req_buffer);
+        let recv_len_future = RecvLenFuture::new(self, len, req_buffer, self.is_closed_receiver.clone());
 
         // Block here until the client is dropped or stream error.
         match recv_len_future.await {
@@ -381,20 +402,27 @@ struct RecvLenFuture<'a, P>
 where
     P: Packet + Clone + Send + Sync + 'static,
 {
+    /// The inner connection for the client.
     client: &'a RpcClientConnectionInner<P>,
+    /// The length of the data to receive.
     len: u64,
+    /// The buffer to store the received data.
     req_buffer: &'a mut BytesMut,
+    /// The receiver for the closed signal.
+    is_closed: flume::Receiver<()>,
 }
 
 impl<'a, P> RecvLenFuture<'a, P>
 where
     P: Packet + Clone + Send + Sync + 'static,
 {
-    fn new(client: &'a RpcClientConnectionInner<P>, len: u64, req_buffer: &'a mut BytesMut) -> Self {
+    /// Create a new receive length future.
+    fn new(client: &'a RpcClientConnectionInner<P>, len: u64, req_buffer: &'a mut BytesMut, is_closed: flume::Receiver<()>) -> Self {
         Self {
             client,
             len,
             req_buffer,
+            is_closed,
         }
     }
 }
@@ -408,7 +436,8 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        if this.client.is_closed.load(std::sync::atomic::Ordering::Acquire) {
+        // Recv closed data from the client channel
+        if this.is_closed.try_recv().is_ok() {
             return Poll::Ready(Err(RpcError::Timeout("Client is closed".to_owned())));
         }
 
@@ -416,7 +445,7 @@ where
         this.req_buffer.resize(u64_to_usize(this.len), 0);
 
         let mut reader = this.client.get_stream_mut();
-        let mut read_buf = ReadBuf::new(&mut this.req_buffer[..]);
+        let mut read_buf = ReadBuf::new(this.req_buffer);
 
         match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
             Poll::Ready(Ok(size)) => {
