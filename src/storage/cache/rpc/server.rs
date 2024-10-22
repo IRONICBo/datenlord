@@ -1,7 +1,8 @@
 use std::{
     cell::UnsafeCell,
     fmt::{self, Debug},
-    sync::Arc, time::Duration,
+    sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -108,7 +109,10 @@ where
     /// Recv request header from the stream
     pub async fn recv_header(&self) -> Result<ReqHeader, RpcError> {
         // Try to read to buffer
-        match self.recv_len(REQ_HEADER_SIZE, self.timeout_options.idle_timeout).await {
+        match self
+            .recv_len(REQ_HEADER_SIZE, self.timeout_options.idle_timeout)
+            .await
+        {
             Ok(()) => {}
             Err(err) => {
                 debug!("Failed to receive request header: {:?}", err);
@@ -128,8 +132,7 @@ where
         let mut req_buffer: &mut BytesMut = unsafe { &mut *self.req_buf.get() };
         req_buffer.resize(u64_to_usize(len), 0);
         let reader = self.get_stream_mut();
-        match read_exact_timeout!(reader, &mut req_buffer, recv_timeout).await
-        {
+        match read_exact_timeout!(reader, &mut req_buffer, recv_timeout).await {
             Ok(size) => {
                 debug!("Received request body: {:?}", size);
                 Ok(())
@@ -214,7 +217,11 @@ where
                 }
             } else {
                 // Try to read the request body
-                match self.inner.recv_len(body_len, self.inner.timeout_options.read_timeout).await {
+                match self
+                    .inner
+                    .recv_len(body_len, self.inner.timeout_options.read_timeout)
+                    .await
+                {
                     Ok(()) => {}
                     Err(err) => {
                         error!("Failed to receive request body: {:?}", err);

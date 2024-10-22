@@ -8,8 +8,11 @@ use std::{
 
 use bytes::BytesMut;
 use futures::{pin_mut, Future};
+use smol::future::FutureExt;
 use tokio::{
-    io::{AsyncRead, AsyncWriteExt, ReadBuf}, net::TcpStream, time::{Instant, Interval}
+    io::{AsyncRead, AsyncWriteExt, ReadBuf},
+    net::TcpStream,
+    time::{Instant, Interval},
 };
 use tracing::debug;
 
@@ -51,9 +54,7 @@ where
     req_buf: UnsafeCell<BytesMut>,
     /// The Client ID for the connection
     client_id: u64,
-    /// Is closed flag sender
-    is_closed_sender: flume::Sender<()>,
-    /// Is closed flag receiver
+    /// The receiver for the closed signal.
     is_closed_receiver: flume::Receiver<()>,
 }
 
@@ -69,33 +70,18 @@ where
     }
 }
 
-/// Drop the client connection, send the close signal to the client
-/// Other side will receive the close signal and close the connection
-impl<P> Drop for RpcClientConnectionInner<P>
-where
-    P: Packet + Clone + Send + Sync + 'static,
-{
-    fn drop(&mut self) {
-        // Send the close signal to the client
-        match self.is_closed_sender.send(()) {
-            Ok(()) => {
-                debug!("{:?} Send close signal to the client", self);
-            }
-            Err(err) => {
-                debug!("{:?} Failed to send close signal to the client: {:?}", self, err);
-            }
-        }
-    }
-}
-
 impl<P> RpcClientConnectionInner<P>
 where
     P: Packet + Clone + Send + Sync + 'static,
 {
     /// Create a new connection.
-    pub fn new(stream: TcpStream, timeout_options: ClientTimeoutOptions, client_id: u64) -> Self {
+    pub fn new(
+        stream: TcpStream,
+        timeout_options: ClientTimeoutOptions,
+        client_id: u64,
+        is_closed_receiver: flume::Receiver<()>,
+    ) -> Self {
         let task_timeout = timeout_options.task_timeout.as_secs();
-        let (is_closed_sender, is_closed_receiver) = flume::unbounded();
         Self {
             stream: UnsafeCell::new(stream),
             timeout_options,
@@ -110,7 +96,6 @@ where
                 common::DEFAULT_TCP_REQUEST_BUFFER_SIZE,
             )),
             client_id,
-            is_closed_sender,
             is_closed_receiver,
         }
     }
@@ -139,7 +124,8 @@ where
         req_buffer.resize(u64_to_usize(len), 0);
         // let reader = self.get_stream_mut();
 
-        let recv_len_future = RecvLenFuture::new(self, len, req_buffer, self.is_closed_receiver.clone());
+        let recv_len_future =
+            RecvLenFuture::new(self, len, req_buffer, self.is_closed_receiver.recv_async());
 
         // Block here until the client is dropped or stream error.
         match recv_len_future.await {
@@ -158,11 +144,7 @@ where
     /// We need to make sure
     /// Current send packet need to be in one task, so if we need to send ping and packet
     /// we need to make sure only one operation is running, like select.
-    async fn send_data(
-        &self,
-        req_header: &dyn Encode,
-        packet: Option<P>,
-    ) -> Result<(), RpcError> {
+    async fn send_data(&self, req_header: &dyn Encode, packet: Option<P>) -> Result<(), RpcError> {
         let buf = unsafe { &mut *self.req_buf.get() };
         buf.clear();
         // encode just need to append to buffer, do not clear buffer
@@ -339,6 +321,10 @@ where
     /// TODO:
     #[allow(dead_code)]
     client_id: AtomicU64,
+    /// Is closed flag sender, this struct is associated with the inner_connection,
+    /// if this client is dropped, the inner_connection receiver will receive the closed signal.
+    #[allow(dead_code)]
+    is_closed_sender: flume::Sender<()>,
 }
 
 impl<P> RpcClient<P>
@@ -352,16 +338,19 @@ where
     /// When the stream is broken, the client will be closed, and we need to recreate a new client
     pub fn new(stream: TcpStream, timeout_options: ClientTimeoutOptions) -> Self {
         let client_id = AtomicU64::new(0);
+        let (is_closed_sender, is_closed_receiver) = flume::unbounded::<()>();
         let inner_connection = RpcClientConnectionInner::new(
             stream,
             timeout_options.clone(),
             client_id.load(std::sync::atomic::Ordering::Acquire),
+            is_closed_receiver,
         );
 
         Self {
             timeout_options,
             inner_connection: Arc::new(inner_connection),
             client_id,
+            is_closed_sender,
         }
     }
 
@@ -409,7 +398,7 @@ where
     /// The buffer to store the received data.
     req_buffer: &'a mut BytesMut,
     /// The receiver for the closed signal.
-    is_closed: flume::Receiver<()>,
+    is_closed: flume::r#async::RecvFut<'a, ()>,
 }
 
 impl<'a, P> RecvLenFuture<'a, P>
@@ -417,7 +406,12 @@ where
     P: Packet + Clone + Send + Sync + 'static,
 {
     /// Create a new receive length future.
-    fn new(client: &'a RpcClientConnectionInner<P>, len: u64, req_buffer: &'a mut BytesMut, is_closed: flume::Receiver<()>) -> Self {
+    fn new(
+        client: &'a RpcClientConnectionInner<P>,
+        len: u64,
+        req_buffer: &'a mut BytesMut,
+        is_closed: flume::r#async::RecvFut<'a, ()>,
+    ) -> Self {
         Self {
             client,
             len,
@@ -436,18 +430,13 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        // Recv closed data from the client channel
-        if this.is_closed.try_recv().is_ok() {
-            return Poll::Ready(Err(RpcError::Timeout("Client is closed".to_owned())));
-        }
-
         // Resize the buffer to accommodate the incoming data
         this.req_buffer.resize(u64_to_usize(this.len), 0);
 
         let mut reader = this.client.get_stream_mut();
         let mut read_buf = ReadBuf::new(this.req_buffer);
 
-        match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
+        let buf_poll_status = match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
             Poll::Ready(Ok(size)) => {
                 debug!("Received response body size: {:?}", size);
                 Poll::Ready(Ok(()))
@@ -457,6 +446,19 @@ where
                 Poll::Ready(Err(RpcError::InternalError(err.to_string())))
             }
             Poll::Pending => Poll::Pending,
+        };
+
+        // Recv closed data from the client channel
+        match this.is_closed.poll(cx) {
+            Poll::Ready(Ok(())) => {
+                debug!("Client is closed, stop the receive loop");
+                Poll::Ready(Err(RpcError::InternalError("Client is closed".to_owned())))
+            }
+            Poll::Ready(Err(err)) => {
+                debug!("Failed to receive closed signal: {:?}", err);
+                Poll::Ready(Err(RpcError::InternalError(err.to_string())))
+            }
+            Poll::Pending => buf_poll_status,
         }
     }
 }
@@ -638,9 +640,16 @@ mod tests {
             keep_alive_timeout: Duration::from_secs(30),
         };
         let client_id = 123;
-        let connection =
-            RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, client_id);
+        let (sender, receiver) = flume::unbounded::<()>();
+        let connection = RpcClientConnectionInner::<TestPacket>::new(
+            stream,
+            timeout_options,
+            client_id,
+            receiver,
+        );
         assert_eq!(connection.client_id, client_id);
+
+        sender.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -661,11 +670,14 @@ mod tests {
             task_timeout: Duration::from_secs(60),
             keep_alive_timeout: Duration::from_secs(30),
         };
-        let connection = RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123);
+        let (sender, receiver) = flume::unbounded::<()>();
+        let connection =
+            RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123, receiver);
         let header = connection.recv_header().await.unwrap();
         assert_eq!(header.seq, 1);
         let resp_op: u8 = RespType::KeepAliveResponse.into();
         assert_eq!(header.op, resp_op);
+        sender.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -681,8 +693,12 @@ mod tests {
             task_timeout: Duration::from_secs(60),
             keep_alive_timeout: Duration::from_secs(30),
         };
-        let connection = RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123);
+        let (sender, receiver) = flume::unbounded::<()>();
+        let connection =
+            RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123, receiver);
         connection.recv_len(10).await.unwrap();
+
+        sender.send(()).unwrap();
     }
 
     struct TestData;
@@ -704,17 +720,18 @@ mod tests {
             task_timeout: Duration::from_secs(60),
             keep_alive_timeout: Duration::from_secs(30),
         };
-        let connection = RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123);
+        let (sender, receiver) = flume::unbounded::<()>();
+        let connection =
+            RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123, receiver);
         let req_header = ReqHeader {
             seq: 1,
             op: ReqType::KeepAliveRequest.into(),
             len: 0,
         };
 
-        connection
-            .send_data(&req_header, None)
-            .await
-            .unwrap();
+        connection.send_data(&req_header, None).await.unwrap();
+
+        sender.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -729,11 +746,18 @@ mod tests {
             keep_alive_timeout: Duration::from_secs(30),
         };
         let client_id = 123;
-        let connection =
-            RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, client_id);
+        let (sender, receiver) = flume::unbounded::<()>();
+        let connection = RpcClientConnectionInner::<TestPacket>::new(
+            stream,
+            timeout_options,
+            client_id,
+            receiver,
+        );
         let seq1 = connection.next_seq();
         let seq2 = connection.next_seq();
         assert_eq!(seq1 + 1, seq2);
+
+        sender.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -754,7 +778,11 @@ mod tests {
             task_timeout: Duration::from_secs(60),
             keep_alive_timeout: Duration::from_secs(30),
         };
-        let connection = RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123);
+        let (sender, receiver) = flume::unbounded::<()>();
+        let connection =
+            RpcClientConnectionInner::<TestPacket>::new(stream, timeout_options, 123, receiver);
         connection.ping().await.unwrap();
+
+        sender.send(()).unwrap();
     }
 }
