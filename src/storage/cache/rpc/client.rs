@@ -297,32 +297,26 @@ where
     #[allow(clippy::mut_from_ref)]
     fn get_stream_mut(&self) -> &mut TcpStream {
         // Current implementation is safe because the stream is only accessed by one thread
-        unsafe { std::mem::transmute::<*mut TcpStream, &mut TcpStream>(self.stream.get()) }
+        unsafe { &mut *self.stream.get() }
     }
 
     /// Get resp buffer with mutable reference
     #[allow(clippy::mut_from_ref)]
     fn get_resp_buf_mut(&self) -> &mut BytesMut {
-        unsafe { std::mem::transmute::<*mut BytesMut, &mut BytesMut>(self.resp_buf.get()) }
+        unsafe { &mut *self.resp_buf.get() }
     }
 
     /// Get req buffer with mutable reference
     #[allow(clippy::mut_from_ref)]
     fn get_req_buf_mut(&self) -> &mut BytesMut {
-        unsafe { std::mem::transmute::<*mut BytesMut, &mut BytesMut>(self.req_buf.get()) }
+        unsafe { &mut *self.req_buf.get() }
     }
 
     /// Get the closed receiver for the connection with mutable reference.
     #[allow(clippy::mut_from_ref)]
     fn get_is_closed_receiver_mut(&self) -> &mut oneshot::Receiver<()> {
-        unsafe {
-            std::mem::transmute::<*mut oneshot::Receiver<()>, &mut oneshot::Receiver<()>>(
-                self.is_closed_receiver.get(),
-            )
-        }
+        unsafe { &mut *self.is_closed_receiver.get() }
     }
-
-
 }
 
 unsafe impl<P> Send for RpcClientConnectionInner<P> where P: Packet + Clone + Send + Sync + 'static {}
