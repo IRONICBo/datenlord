@@ -24,8 +24,13 @@ expect 0 unlink ${n0}
 
 dd if=/dev/random of=${n0} bs=12345 count=1 >/dev/null 2>&1
 expect 0 truncate ${n0} 23456
+actual_size=`${fstest} lstat ${n0} size`
+echo "Debug: ${n0} Expected size 23456, actual size ${actual_size}"
 expect 23456 lstat ${n0} size
+
 expect 0 truncate ${n0} 1
+actual_size=`${fstest} lstat ${n0} size`
+echo "Debug: ${n0} Expected size 1, actual size ${actual_size}"
 expect 1 lstat ${n0} size
 expect 0 unlink ${n0}
 
